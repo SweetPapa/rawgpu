@@ -41,6 +41,8 @@
 #define PPSMC_MSG_SMU_DRAM_ADDR_HI 0x252
 #define PPSMC_MSG_SMU_DRAM_ADDR_LO 0x253
 #define PPSMC_MSG_LoadUcodes       0x254
+#define PPSMC_MSG_API_GetSclkFrequency 0x200
+#define PPSMC_MSG_API_GetMclkFrequency 0x201
 #define PPSMC_Result_OK            0x01
 
 /* smu_ucode_xfer_vi.h */
@@ -138,17 +140,20 @@ static int smc_poll(vi_dev *v, uint32_t addr, uint32_t mask, uint32_t want, bool
   return poll(v, mmSMC_IND_DATA_11, mask, want, eq, last);
 }
 
-/* smu7_send_msg_to_smc_with_parameter(). Returns the SMC's response: 1 = OK,
- * 0xFE = not supported, 0 = no answer within the timeout. */
-static uint32_t smc_msg(vi_dev *v, uint16_t msg, uint32_t arg) {
+/* smu7_send_msg_to_smc_with_parameter(), or smu7_send_msg_to_smc() when
+ * has_arg is false. Returns the SMC's response: 1 = OK, 0xFE = not supported,
+ * 0 = no answer within the timeout. */
+static uint32_t smc_msg_x(vi_dev *v, uint16_t msg, bool has_arg, uint32_t arg) {
   poll(v, mmSMC_RESP_0, SMC_RESP_0__SMC_RESP_MASK, 0, false, NULL); /* previous message answered */
-  vi_wreg(v, mmSMC_MSG_ARG_0, arg);
+  if (has_arg) vi_wreg(v, mmSMC_MSG_ARG_0, arg);
   vi_wreg(v, mmSMC_RESP_0, 0);
   vi_wreg(v, mmSMC_MESSAGE_0, msg);
   uint32_t x = 0;
   poll(v, mmSMC_RESP_0, SMC_RESP_0__SMC_RESP_MASK, 0, false, &x);
   return v->err ? 0 : REG_GET_FIELD(x, SMC_RESP_0, SMC_RESP);
 }
+
+static uint32_t smc_msg(vi_dev *v, uint16_t msg, uint32_t arg) { return smc_msg_x(v, msg, true, arg); }
 
 static uint32_t smc_msg_checked(vi_dev *v, const char *name, uint16_t msg, uint32_t arg) {
   uint32_t resp = smc_msg(v, msg, arg);
@@ -182,6 +187,17 @@ int vi_smu_ucode_status(vi_dev *v, uint32_t *status) {
   uint32_t s = soft_regs_start(v);
   if (!soft_regs_ok(s)) return v->err ? v->err : -EIO;
   *status = vi_rsmc(v, s + offsetof(smu74_soft_registers, UcodeLoadStatus));
+  return v->err;
+}
+
+/* smu7_read_sensor() AMDGPU_PP_SENSOR_GFX_SCLK / _MCLK: the SMC answers in
+ * SMC_MSG_ARG_0, in units of 10 kHz. */
+int vi_smu_clocks(vi_dev *v, uint32_t *sclk_mhz, uint32_t *mclk_mhz) {
+  if (!smc_firmware_up(v)) return v->err ? v->err : -ENODEV;
+  if (smc_msg_x(v, PPSMC_MSG_API_GetSclkFrequency, false, 0) != PPSMC_Result_OK) return v->err ? v->err : -EIO;
+  *sclk_mhz = vi_rreg(v, mmSMC_MSG_ARG_0) / 100;
+  if (smc_msg_x(v, PPSMC_MSG_API_GetMclkFrequency, false, 0) != PPSMC_Result_OK) return v->err ? v->err : -EIO;
+  *mclk_mhz = vi_rreg(v, mmSMC_MSG_ARG_0) / 100;
   return v->err;
 }
 
@@ -222,6 +238,10 @@ void vi_smu_report(vi_dev *v) {
       printf("SMU microcode loaded   unknown: firmware header gives soft registers at 0x%08x\n", s);
     }
   }
+  uint32_t sclk, mclk;
+  if (up && !vi_smu_clocks(v, &sclk, &mclk))
+    printf("clocks (SMC report)    engine %u MHz, memory %u MHz: not reliable before DPM is set up (bench-compute measures)\n",
+           sclk, mclk);
   printf("temperature            %d C\n", vi_temp_c(v));
 }
 

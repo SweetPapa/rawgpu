@@ -173,6 +173,22 @@ int vi_sdma_start(vi_sdma *s, vi_dev *v, int me, vi_mem ring, uint32_t ring_byte
   return v->err;
 }
 
+int vi_sdma_init(vi_dev *v, int me, const char *fw_dir) {
+  vi_program_sequence(v, golden_polaris10, sizeof golden_polaris10 / sizeof golden_polaris10[0]);
+  vi_sdma_stop(v, 0);
+  vi_sdma_stop(v, 1);
+  amd_fw fw;
+  int r = amd_fw_load(&fw, fw_dir, me ? "polaris10_sdma1" : "polaris10_sdma");
+  if (r) return r;
+  uint32_t first_bad = 0;
+  int bad = vi_sdma_check_ucode(v, me, &fw, &first_bad);
+  if (bad > 0)
+    fprintf(stderr, "rawgpu: SDMA%d microcode RAM does not hold %s.bin (first difference at dword %u);\n"
+                    "        run `rawgpu smc-load` first\n", me, fw.name, first_bad);
+  amd_fw_free(&fw);
+  return bad > 0 ? -EIO : bad;
+}
+
 void vi_sdma_free(vi_sdma *s) {
   if (s->shadow && s->shadow != s->ring.cpu) free(s->shadow);
   s->shadow = NULL;

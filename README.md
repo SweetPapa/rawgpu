@@ -27,6 +27,12 @@ PowerColor RX 590 (Polaris 30).
   - A vector add written in OpenCL C and built for gfx803 by Homebrew LLVM
     runs on the card and matches the CPU bit for bit.
   - 1M floats take 0.46 ms in VRAM, still at the VBIOS boot clocks.
+- **There is a host API** (`src/amd_vi_ctx.h`): buffers, SDMA uploads, kernel
+  launches.
+  - At the 300 MHz boot engine clock the card does 1.36 TFLOPS of FP32
+    multiply-add, 99% of what 36 CUs allow at that clock, and copies VRAM at
+    35 GB/s.
+  - Raising the clocks (SMU DPM) is next.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) and [docs/LOG.md](docs/LOG.md).
 
@@ -43,6 +49,7 @@ make
 ./build/rawgpu sdma-test      # DMA host <-> VRAM, with bandwidth
 make kernels                  # needs Homebrew llvm (brew install llvm)
 ./build/rawgpu compute-test   # compute queue, PM4 writes, then the vadd kernel
+./build/rawgpu bench-compute  # host API: bandwidth, FLOPS, SGEMM, all checked on the CPU
 ```
 
 **Keep the Mac awake while the card holds state.** Sleep resets the card (the
@@ -70,6 +77,7 @@ Driver Extensions → TinyGPU. Check that it bound with
 | `rawgpu smc-load [--force]` | Starts the SMC firmware; it loads the SDMA, RLC and CP microcode from VRAM | **Writes**: SMC RAM, 8 MB of reserved VRAM. Lasts until the card loses power |
 | `rawgpu sdma-test [MB] ...` | GART + SDMA bring-up, copy and fill tests with timing (MB ≤ 127) | **Writes**: VM setup, VRAM, host buffers. Needs `smc-load` first |
 | `rawgpu compute-test [--kernel F]` | RLC/MEC bring-up, one compute queue, PM4 writes and fences, then `vadd` on 1M floats | **Writes**: GFX setup, VRAM, host buffers. Needs `smc-load` first |
+| `rawgpu bench-compute [--sgemm N]` | Engine clock (measured on the GPU), copy bandwidth, FP32 MAD/FMA rate, LDS SGEMM | **Writes**: GFX/SDMA setup, VRAM, host buffers. Needs `smc-load` first |
 | `rawgpu soft-reset` | amdgpu's SDMA/MC soft reset for blocks that report busy | **Writes**; see the recovery notes in the roadmap |
 | `rawgpu reset`, `rawgpu asic-reset` | PCIe reset / amdgpu's PCI-config reset | **Writes**; neither had any effect on this card |
 
@@ -108,6 +116,8 @@ src/amd_vi_sdma.c        SDMA v3 rings, copies, fences; sdma-test
 src/amd_vi_smu.c         SMU7: SMC firmware start and SMU-loaded engine microcode; smc-load
 src/amd_vi_gfx.c         GFX v8: RLC/MEC bring-up, a compute queue, dispatch; compute-test
 src/amd_kernel.c         AMDGPU code objects: a kernel's code and descriptor
+src/amd_vi_ctx.c         host API: context, buffers, SDMA transfers, kernel launch
+src/amd_vi_bench.c       bench-compute, written only against the host API
 src/upstream/            amdgpu structure headers, byte for byte (see UPSTREAM.md)
 kernels/                 GPU kernels (OpenCL C), built for gfx803 by `make kernels`
 src/amd_vi_regs.h        generated register subset (tools/gen_vi_regs.py)

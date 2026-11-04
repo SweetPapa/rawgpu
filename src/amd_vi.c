@@ -489,6 +489,7 @@ static int cmd_soft_reset(rg_dev *d, const rg_ident *id, int argc, char **argv) 
 int vi_cmd_sdma_test(rg_dev *d, const rg_ident *id, int argc, char **argv); /* amd_vi_sdma.c */
 int vi_cmd_smc_load(rg_dev *d, const rg_ident *id, int argc, char **argv);  /* amd_vi_smu.c */
 int vi_cmd_compute_test(rg_dev *d, const rg_ident *id, int argc, char **argv); /* amd_vi_gfx.c */
+int vi_cmd_bench_compute(rg_dev *d, const rg_ident *id, int argc, char **argv); /* amd_vi_bench.c */
 
 static const rg_cmd vi_cmds[] = {
   {"status", "", "engine, VM and SMC state (read-only)", cmd_status},
@@ -505,6 +506,9 @@ static const rg_cmd vi_cmds[] = {
    "WRITES: GART + SDMA bring-up, then DMA copies host<->VRAM with timing", vi_cmd_sdma_test},
   {"compute-test", "[--trace FILE]", "WRITES: RLC + MEC bring-up, one compute queue, PM4 writes and fences",
    vi_cmd_compute_test},
+  {"bench-compute", "[--sgemm N] [--kernels DIR]",
+   "WRITES: host API end to end: copy bandwidth, FP32 FMA rate, LDS-tiled SGEMM, each checked on the CPU",
+   vi_cmd_bench_compute},
   {0},
 };
 

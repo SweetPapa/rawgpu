@@ -157,6 +157,10 @@
 #define CB_HW_CONTROL_3__RAM_ADDRESS_CONFLICTS_DISALLOWED_MASK 0x2
 #define CB_HW_CONTROL_3__RAM_ADDRESS_CONFLICTS_DISALLOWED__SHIFT 0x1
 
+#define mmCC_GC_SHADER_ARRAY_CONFIG                          0x226f  /* gca/gfx_8_0 */
+#define CC_GC_SHADER_ARRAY_CONFIG__INACTIVE_CUS_MASK         0xffff0000
+#define CC_GC_SHADER_ARRAY_CONFIG__INACTIVE_CUS__SHIFT       0x10
+
 #define ixCG_ACLK_CNTL                                       0xc05000dc  /* smu/smu_7_1_3 */
 #define CG_ACLK_CNTL__ACLK_DIR_CNTL_DIVIDER_MASK             0x1fc00
 #define CG_ACLK_CNTL__ACLK_DIR_CNTL_DIVIDER__SHIFT           0xa
@@ -1534,6 +1538,10 @@
 #define GB_ADDR_CONFIG__ROW_SIZE__SHIFT                      0x1c
 #define GB_ADDR_CONFIG__SHADER_ENGINE_TILE_SIZE_MASK         0x70000
 #define GB_ADDR_CONFIG__SHADER_ENGINE_TILE_SIZE__SHIFT       0x10
+
+#define mmGC_USER_SHADER_ARRAY_CONFIG                        0x2270  /* gca/gfx_8_0 */
+#define GC_USER_SHADER_ARRAY_CONFIG__INACTIVE_CUS_MASK       0xffff0000
+#define GC_USER_SHADER_ARRAY_CONFIG__INACTIVE_CUS__SHIFT     0x10
 
 #define mmGPU_HDP_FLUSH_DONE                                 0x1538  /* bif/bif_5_0 */
 #define GPU_HDP_FLUSH_DONE__CP0_MASK                         0x1

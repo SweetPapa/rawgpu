@@ -127,17 +127,33 @@ needs a linker.
 
 ## Stage 5: workloads
 
-Prerequisites, roughly in order:
+Done (2026-11-04):
 
-- **Clocks.** Everything runs at the VBIOS boot clocks: engine 300 MHz,
-  memory 400 MHz. Raising them means SMU DPM: the power-play tables from the
-  VBIOS, then `PPSMC_MSG_EnableDPM`-style messages, and fan and thermal limits
-  first. Temperature is already in `status`.
-- **Kernel features:** LDS sizing, scratch (`COMPUTE_TMPRING_SIZE` and a
-  private-segment buffer), and linked code objects, so real kernels run.
-- **A host API:** allocate VRAM and host buffers, upload by SDMA, launch,
-  wait. Then a small library, so a workload is a C program and not a
-  `compute-test` phase.
+- **Host API** (`src/amd_vi_ctx.h`): a context with the GART, SDMA0 and a
+  compute queue; VRAM and host buffers; reads and writes by SDMA through a
+  staging buffer; kernel loading; synchronous launches with 3D grids.
+- **LDS** sized from the kernel descriptor.
+- **`rawgpu bench-compute`:** copy bandwidth, FP32 MAD and FMA rates, and an
+  LDS-tiled SGEMM, all checked on the CPU. At the boot clocks the card
+  delivers what the silicon allows:
+  - MAD: 1363 of a possible 1382 GFLOPS.
+  - Copy: 35 GB/s, against 51 GB/s for the bus at that clock.
+
+Next:
+
+- **Clocks.** The engine runs at 300 MHz (measured on the GPU) and memory at
+  400 MHz. The RX 590 is rated for about 1.5 GHz and 2 GHz, about 5× both.
+  - Clocks are raised the way amdgpu does: SMU7 DPM. The VBIOS PowerPlay
+    table (`process_pptables_v1_0.c`) gives the clock and voltage levels.
+    `polaris10_init_smc_table()` writes them into the SMC's DPM table, then
+    the enable messages follow.
+  - Thermal and fan control come first. Voltages come only from the VBIOS
+    tables, through the same code amdgpu uses.
+- **Kernel features:** scratch (`COMPUTE_TMPRING_SIZE` and a
+  private-segment buffer), and linked code objects (`ld.lld`), so arbitrary
+  OpenCL kernels run.
+- **A library:** the host API as a C library with a header outside the
+  backend, so a workload is its own program.
 
 Pick a narrow workload that fits 8 GB and Polaris's FP32 strength (6–7 TFLOPS,
 256 GB/s, no fast FP16), and that can run as a background job from the Mac:

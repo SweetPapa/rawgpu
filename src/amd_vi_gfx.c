@@ -197,6 +197,19 @@ static void cp_doorbells_and_mec(vi_dev *v) {
   vi_udelay(50);
 }
 
+/* gfx_v8_0_get_cu_active_bitmap(), summed over the shader engines */
+#define POLARIS10_CU_PER_SH 9 /* max_cu_per_sh (VBIOS gfx_info): 36 CUs over 4 SEs */
+int vi_gfx_cu_count(vi_dev *v) {
+  int n = 0;
+  for (uint32_t se = 0; se < POLARIS10_SE; se++) {
+    select_se_sh(v, se, 0);
+    uint32_t data = vi_rreg(v, mmCC_GC_SHADER_ARRAY_CONFIG) | vi_rreg(v, mmGC_USER_SHADER_ARRAY_CONFIG);
+    n += __builtin_popcount(~REG_GET_FIELD(data, CC_GC_SHADER_ARRAY_CONFIG, INACTIVE_CUS) & ((1u << POLARIS10_CU_PER_SH) - 1));
+  }
+  select_se_sh(v, ~0u, ~0u);
+  return v->err ? v->err : n;
+}
+
 int vi_gfx_compute_init(vi_dev *v) {
   golden_registers(v);
   constants(v);
@@ -471,7 +484,7 @@ int vi_kernel_check(const amd_kernel *k) {
   if (k->mach != EF_AMDGPU_MACH_AMDGCN_GFX803) why = "it is not built for gfx803 (Polaris): use -mcpu=gfx803";
   else if (k->private_segment_size || REG_GET_FIELD(k->rsrc2, COMPUTE_PGM_RSRC2, SCRATCH_EN))
     why = "it uses scratch memory, which rawgpu does not set up yet";
-  else if (k->group_segment_size) why = "it uses LDS (group segment), which rawgpu does not size yet";
+  else if (k->group_segment_size > VI_LDS_MAX) why = "it wants more than 64 KB of LDS";
   else if (k->code_properties & ~supported)
     why = "it wants user SGPRs beyond the private segment buffer and kernarg pointer (dispatch/queue pointers)";
   else if (k->entry & 0xFF) why = "its entry point is not 256-byte aligned";
@@ -500,8 +513,8 @@ static void cq_mem_sync(vi_cq *q) {
 /* The register state and DISPATCH_DIRECT amdgpu uses for its own compute
  * dispatch (gfx_v8_0_do_edc_gpr_workarounds()), with the program, resources
  * and user SGPRs from the kernel descriptor. */
-uint32_t vi_cq_dispatch(vi_cq *q, const amd_kernel *k, uint64_t code_gpu, uint64_t kernarg_gpu, uint32_t wg_size,
-                        uint32_t groups) {
+uint32_t vi_cq_dispatch(vi_cq *q, const amd_kernel *k, uint64_t code_gpu, uint64_t kernarg_gpu, const uint32_t wg[3],
+                        const uint32_t groups[3]) {
   uint32_t user[6], nu = 0;
   if (k->code_properties & AMD_KCP_PRIVATE_SEGMENT_BUFFER) { user[nu++] = 0; user[nu++] = 0; user[nu++] = 0; user[nu++] = 0; }
   if (k->code_properties & AMD_KCP_KERNARG_SEGMENT_PTR) { user[nu++] = (uint32_t)kernarg_gpu; user[nu++] = (uint32_t)(kernarg_gpu >> 32); }
@@ -512,12 +525,14 @@ uint32_t vi_cq_dispatch(vi_cq *q, const amd_kernel *k, uint64_t code_gpu, uint64
   }
   if (cq_reserve(q, 96)) return 0;
   uint64_t pgm = (code_gpu + k->entry) >> 8;
-  const uint32_t start[3] = {0, 0, 0}, threads[3] = {wg_size, 1, 1};
-  const uint32_t pgm_addr[2] = {(uint32_t)pgm, (uint32_t)(pgm >> 32)}, rsrc[2] = {k->rsrc1, k->rsrc2};
+  const uint32_t start[3] = {0, 0, 0};
+  /* LDS is allocated per work-group in 128-dword (512-byte) blocks on GFX7+ */
+  uint32_t rsrc2 = REG_SET_FIELD(k->rsrc2, COMPUTE_PGM_RSRC2, LDS_SIZE, (k->group_segment_size + 511) / 512);
+  const uint32_t pgm_addr[2] = {(uint32_t)pgm, (uint32_t)(pgm >> 32)}, rsrc[2] = {k->rsrc1, rsrc2};
   const uint32_t all_cus[2] = {0xffffffff, 0xffffffff}, zero = 0;
   cq_mem_sync(q);
   cq_set_sh(q, mmCOMPUTE_START_X, start, 3);
-  cq_set_sh(q, mmCOMPUTE_NUM_THREAD_X, threads, 3);
+  cq_set_sh(q, mmCOMPUTE_NUM_THREAD_X, wg, 3);
   cq_set_sh(q, mmCOMPUTE_PGM_LO, pgm_addr, 2);
   cq_set_sh(q, mmCOMPUTE_PGM_RSRC1, rsrc, 2);
   cq_set_sh(q, mmCOMPUTE_RESOURCE_LIMITS, &zero, 1);
@@ -526,9 +541,9 @@ uint32_t vi_cq_dispatch(vi_cq *q, const amd_kernel *k, uint64_t code_gpu, uint64
   cq_set_sh(q, mmCOMPUTE_TMPRING_SIZE, &zero, 1);
   if (nu) cq_set_sh(q, mmCOMPUTE_USER_DATA_0, user, nu);
   cq_put(q, PACKET3(PACKET3_DISPATCH_DIRECT, 3));
-  cq_put(q, groups);
-  cq_put(q, 1);
-  cq_put(q, 1);
+  cq_put(q, groups[0]);
+  cq_put(q, groups[1]);
+  cq_put(q, groups[2]);
   cq_put(q, REG_SET_FIELD(0, COMPUTE_DISPATCH_INITIATOR, COMPUTE_SHADER_EN, 1));
   uint32_t seq = cq_emit_fence(q); /* end-of-pipe: waits for the dispatch, flushes L2 */
   cq_commit(q);
@@ -697,7 +712,8 @@ int vi_cmd_compute_test(rg_dev *d, const rg_ident *id, int argc, char **argv) {
     if ((r = vi_vram_write(&v, V_KARG, &karg, sizeof karg))) goto out;
     vi_hdp_flush(&v);
     double t = vi_now();
-    seq = vi_cq_dispatch(&q, &k, g.vram_start + V_CODE, g.vram_start + V_KARG, WG, N / WG);
+    const uint32_t wg[3] = {WG, 1, 1}, groups[3] = {N / WG, 1, 1};
+    seq = vi_cq_dispatch(&q, &k, g.vram_start + V_CODE, g.vram_start + V_KARG, wg, groups);
     if (!seq || (r = vi_cq_wait(&q, seq, 5000))) { vi_cq_dump(&q); r = r ? r : -EIO; goto out; }
     t = vi_now() - t;
     const float *out = C;

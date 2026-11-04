@@ -2,6 +2,52 @@
 
 Dated, factual notes from real hardware. Newest first.
 
+## 2026-11-04: stage 5 begins: host API, LDS, and what boot clocks give
+
+Same setup. `rawgpu bench-compute` (`src/amd_vi_bench.c`) runs entirely on
+the new host API (`src/amd_vi_ctx.h`): a context that owns the GART, SDMA0
+and the compute queue, plus buffers, uploads by SDMA, kernel loading and
+launches. Every result is checked against the CPU before its time is printed.
+
+```
+card:         36 compute units active; temperature 32 C
+clock:        one wave, 4194304 loop iterations in 728.8 ms: engine (s_memtime) 299.3 MHz, reference (s_memrealtime) 25.0 MHz
+copy:         256 MB VRAM -> VRAM: 15.19 ms, 35.4 GB/s (read + write); first 16 MB and last 1 MB intact
+fp32 mad:     1048576 work-items x 4096 x 8 MADs (v_mad_f32: full rate): 50.40 ms, 1363 GFLOPS; 4096 samples match the CPU
+fp32 fma:     1048576 work-items x 4096 x 8 FMAs (fused: quarter rate on Polaris): 200.28 ms, 343 GFLOPS; 4096 samples match the CPU
+sgemm:        1024x1024, 16x16 LDS tiles: 12.24 ms, 175 GFLOPS; 64 rows match the CPU
+```
+
+- **36 CUs are active.** That count is read from
+  `CC_GC_SHADER_ARRAY_CONFIG | GC_USER_SHADER_ARRAY_CONFIG` per shader
+  engine, as `gfx_v8_0_get_cu_active_bitmap()` does.
+- **The engine clock is 300 MHz under load.** It was measured on the GPU:
+  `s_memtime` ticks over the host's wall time for a 0.73 s launch.
+  `s_memrealtime` counts at 25.0 MHz, the reference clock.
+- **The SMC's own clock report is wrong here.** `PPSMC_MSG_API_GetSclkFrequency`
+  and `GetMclkFrequency` answer 135 MHz and 150 MHz.
+  - That cannot be the memory clock: 150 MHz GDDR5 on 256 bits peaks at
+    19 GB/s, and the copy moves 35 GB/s.
+  - rawgpu has not given the SMC any DPM tables, so `status` labels the
+    report as unreliable.
+- **Full-rate FP32 is `v_mad_f32`.** It reached 1363 GFLOPS, 98.6% of the
+  1382 GFLOPS that 36 CUs × 64 lanes × 2 at 300 MHz allow.
+  - Fused `v_fma_f32` runs at exactly a quarter of that: 343 GFLOPS. LLVM's
+    gfx803 target lacks `FastFMAF32`, for this reason.
+  - OpenCL's `a * b + c` becomes `v_mac`/`v_mad`. `__builtin_fmaf` stays fused.
+- **Copy:** 35.4 GB/s is 69% of the 51.2 GB/s a 256-bit GDDR5 bus gives at
+  the 400 MHz boot memory clock.
+- **SGEMM** is the first kernel with LDS. The descriptor asks for 2048 bytes,
+  and rawgpu sets `COMPUTE_PGM_RSRC2.LDS_SIZE` in 512-byte units.
+  - It took 12.2 ms at 1024 (175 GFLOPS) and 93 ms at 2048 (184 GFLOPS).
+  - The speed did not change when its inner product went from fused to MAD,
+    so it is bound by LDS traffic, not ALU. Its inputs are multiples of 1/16,
+    so every partial sum is exact and the CPU check is bit for bit.
+- After the runs: no VM faults, no PCI/PCIe/AER errors, 33 C.
+
+At the RX 590's rated clocks the same measurements should scale about 5×:
+roughly 7 TFLOPS and 200+ GB/s. That makes clocks the next thing to bring up.
+
 ## 2026-11-04: stage 4, a compute queue and the first kernel
 
 Same host, enclosure and card, posted and with `smc-load` done. The commands

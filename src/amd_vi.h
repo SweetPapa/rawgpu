@@ -84,6 +84,7 @@ int vi_vram_zero(vi_dev *v, uint64_t off, size_t len);
 bool vi_smc_running(vi_dev *v);                       /* smu7_is_smc_ram_running() */
 int vi_smu_ucode_status(vi_dev *v, uint32_t *status); /* UcodeLoadStatus; -ENODEV if the SMC firmware is not up */
 int vi_temp_c(vi_dev *v);                             /* GPU temperature in degrees C */
+int vi_smu_clocks(vi_dev *v, uint32_t *sclk_mhz, uint32_t *mclk_mhz); /* as the SMC reports them */
 void vi_smu_report(vi_dev *v);
 
 /* ---- SDMA v3 (amd_vi_sdma.c) ---- */
@@ -120,6 +121,8 @@ typedef struct {
  * *first_bad), or a negative error. Restores UCODE_ADDR. */
 int vi_sdma_check_ucode(vi_dev *v, int me, const amd_fw *fw, uint32_t *first_bad);
 int vi_sdma_soft_reset(vi_dev *v);
+/* Golden registers, both engines halted, and engine `me`'s microcode checked (Polaris 10). */
+int vi_sdma_init(vi_dev *v, int me, const char *fw_dir);
 int vi_sdma_start(vi_sdma *s, vi_dev *v, int me, vi_mem ring, uint32_t ring_bytes, vi_mem wb);
 void vi_sdma_stop(vi_dev *v, int me);
 void vi_sdma_free(vi_sdma *s);
@@ -151,6 +154,7 @@ typedef struct {
 /* gfx_v8_0_hw_init() for compute: golden registers, VMID0 shader memory
  * config, RLC resume, doorbells. Needs the SMU-loaded RLC and MEC microcode. */
 int vi_gfx_compute_init(vi_dev *v);
+int vi_gfx_cu_count(vi_dev *v); /* active compute units */
 /* Loads ME1 pipe 0 queue 0 from an MQD and activates it. All four areas
  * must be 256-byte aligned; eop is GFX8_MEC_HPD_SIZE (4 KB). */
 int vi_cq_start(vi_cq *q, vi_dev *v, vi_mem ring, uint32_t ring_bytes, vi_mem wb, vi_mem mqd, vi_mem eop);
@@ -160,12 +164,13 @@ int vi_cq_ring_test(vi_cq *q);
 uint32_t vi_cq_write(vi_cq *q, uint64_t gpu, uint32_t value);
 int vi_cq_wait(vi_cq *q, uint32_t seq, unsigned timeout_ms);
 void vi_cq_dump(vi_cq *q);
-/* Can vi_cq_dispatch() run this kernel? (gfx803, no scratch or LDS, only the
- * private-segment and kernarg user SGPRs.) Prints why not. */
+#define VI_LDS_MAX (64u << 10) /* LDS per compute unit */
+/* Can vi_cq_dispatch() run this kernel? (gfx803, no scratch, LDS within a CU,
+ * only the private-segment and kernarg user SGPRs.) Prints why not. */
 int vi_kernel_check(const amd_kernel *k);
-/* Dispatches `groups` work-groups of `wg_size` work-items, code at MC address
- * code_gpu (256-byte aligned), then a fence; returns the fence seq or 0. */
-uint32_t vi_cq_dispatch(vi_cq *q, const amd_kernel *k, uint64_t code_gpu, uint64_t kernarg_gpu, uint32_t wg_size,
-                        uint32_t groups);
+/* Dispatches groups[0..2] work-groups of wg[0..2] work-items, code at MC
+ * address code_gpu (256-byte aligned), then a fence; returns the fence seq or 0. */
+uint32_t vi_cq_dispatch(vi_cq *q, const amd_kernel *k, uint64_t code_gpu, uint64_t kernarg_gpu, const uint32_t wg[3],
+                        const uint32_t groups[3]);
 
 #endif
