@@ -75,7 +75,7 @@ REGS = [
     "CC_GC_SHADER_ARRAY_CONFIG", "GC_USER_SHADER_ARRAY_CONFIG",
     # indirect spaces for powerplay (vi_pcie_rreg(), vi_didt_rreg(), vi_gc_cac_rreg())
     "PCIE_INDEX", "PCIE_DATA", "DIDT_IND_INDEX", "DIDT_IND_DATA", "GC_CAC_IND_INDEX", "GC_CAC_IND_DATA",
-    "FEATURE_STATUS",
+    "FEATURE_STATUS", "PWR_SVI2_STATUS", "TARGET_AND_CURRENT_PROFILE_INDEX", "TARGET_AND_CURRENT_PROFILE_INDEX_1",
     # MC sequencer firmware (gmc_v8_0_polaris_mc_load_microcode())
     "MC_SEQ_IO_DEBUG_INDEX", "MC_SEQ_IO_DEBUG_DATA", "MC_SEQ_SUP_PGM",
 ]

@@ -245,6 +245,23 @@ void vi_smu_report(vi_dev *v) {
            REG_GET_FIELD(fs, FEATURE_STATUS, SCLK_DPM_ON) ? "on" : "off",
            REG_GET_FIELD(fs, FEATURE_STATUS, MCLK_DPM_ON) ? "on" : "off",
            REG_GET_FIELD(fs, FEATURE_STATUS, VOLTAGE_CONTROLLER_ON) ? "on" : "off", dpm ? "" : " (rawgpu dpm-enable)");
+  if (up) { /* what the SMC is actually doing: DPM indices and the regulator's live voltages */
+    uint32_t t0 = vi_rsmc(v, ixTARGET_AND_CURRENT_PROFILE_INDEX), t1 = vi_rsmc(v, ixTARGET_AND_CURRENT_PROFILE_INDEX_1);
+    uint32_t svi = vi_rsmc(v, ixPWR_SVI2_STATUS);
+    uint32_t vid1 = REG_GET_FIELD(svi, PWR_SVI2_STATUS, PLANE1_VID), vid2 = REG_GET_FIELD(svi, PWR_SVI2_STATUS, PLANE2_VID);
+    printf("DPM levels             SCLK %u -> %u, MCLK %u -> %u, PCIe %u -> %u, VDDC index %u -> %u (current -> target)\n",
+           REG_GET_FIELD(t0, TARGET_AND_CURRENT_PROFILE_INDEX, CURR_SCLK_INDEX),
+           REG_GET_FIELD(t0, TARGET_AND_CURRENT_PROFILE_INDEX, TARG_SCLK_INDEX),
+           REG_GET_FIELD(t0, TARGET_AND_CURRENT_PROFILE_INDEX, CURR_MCLK_INDEX),
+           REG_GET_FIELD(t0, TARGET_AND_CURRENT_PROFILE_INDEX, TARG_MCLK_INDEX),
+           REG_GET_FIELD(t1, TARGET_AND_CURRENT_PROFILE_INDEX_1, CURR_PCIE_INDEX),
+           REG_GET_FIELD(t1, TARGET_AND_CURRENT_PROFILE_INDEX_1, TARG_PCIE_INDEX),
+           REG_GET_FIELD(t1, TARGET_AND_CURRENT_PROFILE_INDEX_1, CURR_VDDC_INDEX),
+           REG_GET_FIELD(t1, TARGET_AND_CURRENT_PROFILE_INDEX_1, TARG_VDDC_INDEX));
+    /* smu_helper.c convert_to_vddc(): (6200 - 25 * VID) / 4 mV */
+    printf("SVI2 voltages          plane 1 VID %u = %u mV, plane 2 VID %u = %u mV\n", vid1, (6200 - vid1 * 25) / 4, vid2,
+           (6200 - vid2 * 25) / 4);
+  }
   if (up && !vi_smu_clocks(v, &sclk, &mclk))
     printf("clocks (SMC report)    engine %u MHz, memory %u MHz%s\n", sclk, mclk,
            dpm ? "" : ": not reliable before DPM is set up (bench-compute measures)");

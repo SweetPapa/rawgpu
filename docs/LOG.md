@@ -107,6 +107,38 @@ no Mac restart).**
   - Next test: `dpm-enable --no-mclk --no-deep-sleep --no-ulv`, then
     `vram-test`.
 
+**Third attempt (after another unplug and power cycle; no Mac restart).**
+
+- The teardown completed again and the card came back. The bring-up passed:
+  `post`, `mc-load` (training 3.9 ms), `smc-load`.
+- `dpm-enable --no-mclk --no-deep-sleep --no-ulv`: `FEATURE_STATUS`
+  `0x0000e001`.
+  - The rebuilt table confirms `DeepSleepDivId` = 0 at every level.
+  - Even so, the SMC reported 13 MHz, then 60 MHz, at idle.
+- `vram-test` (traced): the first two 64 KB BAR0 writes drained, slowly
+  (1.8 MB/s against 18 MB/s before DPM). The card died during the third.
+  - **So deep sleep and ULV are not the cause either.**
+- Two things in the traces, which amdgpu also does:
+  - Every DPM run clears `SWRST_COMMAND_1.RESETLC` in the GPU's PCIe space.
+    It reads `0x40` and is written `0`; `smu7_start_dpm()` calls this
+    "prepare for PCIE DPM" and runs it even with PCIe DPM off.
+  - `MC_ARB_CG` switches to timing set F1, as `smu7_initial_switch_from_arbf0_to_f1()`
+    does. The arbiter timings the VBIOS computed per level look sane, and the
+    first equals the boot timing.
+- **A pattern in the SMC's idle engine-clock report:**
+  - Run 1, memory DPM on: 285-300 MHz.
+  - Runs 2 and 3, memory DPM off: 13-60 MHz.
+  - If those are real, the host data path ran at a tenth of its clock. That
+    matches the 10x slower BAR writes and a stall long enough to lose the
+    device.
+  - Run 1 died on the MC reprogramming under DPM, which is now fixed. So
+    amdgpu's own configuration, memory DPM on, has not had a clean test.
+- `status` now reads the SMC's current and target DPM indices
+  (`TARGET_AND_CURRENT_PROFILE_INDEX`, `_1`) and the regulator's live
+  voltages (`PWR_SVI2_STATUS`, converted as `convert_to_vddc()` does).
+- Next: `dpm-enable` with amdgpu's features (less PCIe DPM and AVFS), with
+  `status` before and after, then `vram-test`.
+
 ## 2026-11-04: stage 5 begins: host API, LDS, and what boot clocks give
 
 Same setup. `rawgpu bench-compute` (`src/amd_vi_bench.c`) runs entirely on
