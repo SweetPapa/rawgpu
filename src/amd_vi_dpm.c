@@ -15,6 +15,8 @@
 /* amdgpu_drv.c amdgpu_pp_feature_mask, and amd_shared.h PP_FEATURE_MASK bits */
 #define PP_FEATURE_MASK_DEFAULT 0xfff7bfffu
 #define PP_MCLK_DPM_MASK 0x2u
+#define PP_SCLK_DEEP_SLEEP_MASK 0x8u
+#define PP_ULV_MASK 0x100u
 #define PP_PCIE_DPM_MASK 0x4u
 #define PP_AVFS_MASK 0x40000u
 
@@ -160,8 +162,9 @@ static int dpm_open(dpm_ctx *c, rg_dev *d, const rg_ident *id, int verbosity, bo
   printf("card:         %s kicker part, SMC firmware 0x%08x, reference clock %.2f MHz, PCIe Gen%d x%d (GPU: Gen%d), "
          "%u-bit GDDR5, %u CUs\n", h.is_kicker ? "a" : "not a", h.smc_version, h.xclk / 100.0, cur_gen, cur_width,
          max_gen, h.vram_width, h.cu_count);
-  printf("features:     ppfeaturemask 0x%08x (amdgpu's 0x%08x without PCIe DPM and AVFS%s)\n", h.feature_mask,
-         PP_FEATURE_MASK_DEFAULT, drop_features & PP_MCLK_DPM_MASK ? ", memory DPM" : "");
+  printf("features:     ppfeaturemask 0x%08x (amdgpu's 0x%08x without PCIe DPM and AVFS%s%s%s)\n", h.feature_mask,
+         PP_FEATURE_MASK_DEFAULT, drop_features & PP_MCLK_DPM_MASK ? ", memory DPM" : "",
+         drop_features & PP_SCLK_DEEP_SLEEP_MASK ? ", deep sleep" : "", drop_features & PP_ULV_MASK ? ", ULV" : "");
   return rg_pp_open(&c->pp, &h);
 }
 
@@ -211,6 +214,8 @@ int vi_cmd_dpm_enable(rg_dev *d, const rg_ident *id, int argc, char **argv) {
   for (int i = 0; i < argc; i++) {
     if (!strcmp(argv[i], "-v")) verbosity++;
     else if (!strcmp(argv[i], "--no-mclk")) drop |= PP_MCLK_DPM_MASK; /* engine DPM only: memory stays at boot clock */
+    else if (!strcmp(argv[i], "--no-deep-sleep")) drop |= PP_SCLK_DEEP_SLEEP_MASK; /* no SCLK divider at idle */
+    else if (!strcmp(argv[i], "--no-ulv")) drop |= PP_ULV_MASK;                     /* no ultra-low voltage at idle */
     else if (!strcmp(argv[i], "--trace") && i + 1 < argc) trace_path = argv[++i];
     else if (!strcmp(argv[i], "--level") && i + 1 < argc) {
       const char *l = argv[++i];

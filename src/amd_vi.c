@@ -96,6 +96,10 @@ void vi_srbm_select(vi_dev *v, uint32_t me, uint32_t pipe, uint32_t queue, uint3
 int vi_open(vi_dev *v, rg_dev *d) {
   memset(v, 0, sizeof *v);
   v->d = d;
+  /* RAWGPU_TRACE=FILE: every register access of any command, appended and
+   * line-buffered so the end of the trace survives a hang. */
+  const char *tp = getenv("RAWGPU_TRACE");
+  if (tp && (v->trace = fopen(tp, "a"))) setvbuf(v->trace, NULL, _IOLBF, 0);
   uint64_t sz = 0;
   int r = rg_bar_map(d, VI_REG_BAR, &sz);
   if (r) { fprintf(stderr, "rawgpu: could not map register BAR%d\n", VI_REG_BAR); return r; }
@@ -547,7 +551,7 @@ static const rg_cmd vi_cmds[] = {
    vi_cmd_compute_test},
   {"dpm-info", "[-v]", "PowerPlay table and EVV voltages, parsed by amdgpu's powerplay code (no clock or SMC writes)",
    vi_cmd_dpm_info},
-  {"dpm-enable", "[--no-mclk] [--level auto|low|high] [-v] [--trace FILE]",
+  {"dpm-enable", "[--no-mclk] [--no-deep-sleep] [--no-ulv] [--level auto|low|high] [-v] [--trace FILE]",
    "WRITES: amdgpu's power management: DPM tables into the SMC, clock/voltage DPM, fan and power limits on",
    vi_cmd_dpm_enable},
   {"bench-compute", "[--sgemm N] [--kernels DIR]",

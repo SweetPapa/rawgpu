@@ -51,9 +51,10 @@ fan: present; curve 40 C -> 20%, 65 C -> 40%, 85 C -> 60%
 - amdgpu programs the MC once, at hw_init. rawgpu re-ran `mc_program()` in a
   new process with DPM live.
 
-The likely sequence: memory traffic made the SMC switch the memory clock,
-and the switch failed without the driver's MC firmware. This is not
-confirmed: no trace was running during `bench-compute`.
+At the time, this looked like the likely sequence: memory traffic made the
+SMC switch the memory clock, and the switch failed without the driver's MC
+firmware. It was not confirmed (no trace ran during `bench-compute`), and the
+second attempt below rules it out.
 
 **Changes:**
 
@@ -67,6 +68,44 @@ confirmed: no trace was running during `bench-compute`.
 - `dpm-enable --no-mclk` turns on engine DPM alone, for a staged test.
 
 Order from power-on: `post`, `mc-load`, `smc-load`, `dpm-enable`.
+
+**Second attempt (same day, after unplugging and power-cycling the enclosure;
+no Mac restart).**
+
+- The teardown completed this time, and the card re-enumerated with TinyGPU
+  bound. The old dext instance stayed registered but idle.
+- `post` and `mc-load` ran. The MC firmware version register read
+  `0x01b4df80` **before** the load, which is the driver file's version. So the
+  VBIOS had already installed it, and a missing MC firmware was not the cause.
+- `smc-load`, `sdma-test` and `compute-test` all passed. The second
+  `vi_gmc_init()` took the new live-GART path.
+- `dpm-enable --no-mclk`: `FEATURE_STATUS` `0x0000e001` (engine DPM,
+  voltage controller, TDC, CAC; memory DPM off). The SMC reported 17 MHz
+  engine at idle (deep sleep), 400 MHz memory, 2.1 W.
+- `bench-compute` with `RAWGPU_TRACE`: the same wedge.
+  - The trace shows the SMC and VM reads fine, then 516 KB written into VRAM
+    through BAR0 (the GART table and scratch).
+  - The very next register read (`HDP_MEM_COHERENCY_FLUSH_CNTL`) returned
+    `0xffffffff`, and every read after it did too.
+  - So memory DPM was not the cause either. The card dies on a burst of
+    host BAR writes once DPM runs, while register reads alone (`status`) keep
+    working.
+- The DPM table rawgpu wrote, rebuilt from the `dpm-enable` traces, looks
+  sane.
+  - Levels: 300, 909, 1134, 1266, 1365, 1432, 1490, 1545 MHz.
+  - The PLL settings follow the formulas of amdgpu's reference table
+    (`avfs_graphics_level_polaris10`), and level 0 matches its PLL settings
+    exactly, apart from spread spectrum, which this VBIOS enables.
+  - Minimum voltages: 0.75-1.16 V.
+  - Deep-sleep dividers: 3 at level 0, 5 above.
+- **Working theory.** At idle the SMC drops the engine clock into deep sleep,
+  and probably ULV, and the host data path runs on that clock.
+  - A register read queued behind a burst of posted BAR writes waits for them
+    to drain.
+  - If Apple's PCIe controller times out that completion sooner than an x86
+    host would, the device is lost.
+  - Next test: `dpm-enable --no-mclk --no-deep-sleep --no-ulv`, then
+    `vram-test`.
 
 ## 2026-11-04: stage 5 begins: host API, LDS, and what boot clocks give
 
