@@ -4,6 +4,7 @@
 
 #include "rg.h"
 #include "amd_fw.h"
+#include "amd_kernel.h"
 #include "amd_vi_regs.h"
 
 #include <stdio.h>
@@ -94,6 +95,10 @@ typedef struct {
   uint64_t bar;
   uint64_t gpu; /* MC address */
 } vi_mem;
+/* 32-bit read / bulk write of a vi_mem. A VRAM read invalidates HDP first, so
+ * it sees what an engine wrote. Follow VRAM writes with vi_hdp_flush(). */
+uint32_t vi_mem_read32(vi_dev *v, const vi_mem *m, uint32_t off);
+void vi_mem_write(vi_dev *v, const vi_mem *m, uint64_t off, const void *src, size_t len);
 
 typedef struct {
   vi_dev *v;
@@ -126,5 +131,41 @@ uint32_t vi_sdma_fill(vi_sdma *s, uint64_t dst, uint32_t value, uint64_t bytes);
 int vi_sdma_wait(vi_sdma *s, uint32_t seq, unsigned timeout_ms);
 void vi_sdma_dump(vi_sdma *s);
 void vi_sdma_report(vi_dev *v);
+
+/* ---- GFX v8 compute: RLC, MEC and one compute queue (amd_vi_gfx.c) ---- */
+
+/* Writeback block of a compute queue */
+#define VI_CQ_WB_RPTR  0  /* the CP reports its read pointer here, in dwords */
+#define VI_CQ_WB_WPTR  8  /* copy of the write pointer (CP_PQ_WPTR_POLL_CNTL is off; the doorbell carries it) */
+#define VI_CQ_WB_FENCE 16 /* RELEASE_MEM fence */
+
+typedef struct {
+  vi_dev *v;
+  uint32_t me, pipe, queue, doorbell;
+  vi_mem ring, wb, mqd, eop;
+  uint32_t *shadow;                  /* CPU copy of a VRAM ring; == ring.cpu for a host ring */
+  uint32_t ring_dw, wptr, committed; /* in dwords */
+  uint32_t seq;
+} vi_cq;
+
+/* gfx_v8_0_hw_init() for compute: golden registers, VMID0 shader memory
+ * config, RLC resume, doorbells. Needs the SMU-loaded RLC and MEC microcode. */
+int vi_gfx_compute_init(vi_dev *v);
+/* Loads ME1 pipe 0 queue 0 from an MQD and activates it. All four areas
+ * must be 256-byte aligned; eop is GFX8_MEC_HPD_SIZE (4 KB). */
+int vi_cq_start(vi_cq *q, vi_dev *v, vi_mem ring, uint32_t ring_bytes, vi_mem wb, vi_mem mqd, vi_mem eop);
+void vi_cq_stop(vi_cq *q); /* drains and deactivates the HQD */
+int vi_cq_ring_test(vi_cq *q);
+/* WRITE_DATA of one dword plus a fence; returns the fence seq, or 0 on error */
+uint32_t vi_cq_write(vi_cq *q, uint64_t gpu, uint32_t value);
+int vi_cq_wait(vi_cq *q, uint32_t seq, unsigned timeout_ms);
+void vi_cq_dump(vi_cq *q);
+/* Can vi_cq_dispatch() run this kernel? (gfx803, no scratch or LDS, only the
+ * private-segment and kernarg user SGPRs.) Prints why not. */
+int vi_kernel_check(const amd_kernel *k);
+/* Dispatches `groups` work-groups of `wg_size` work-items, code at MC address
+ * code_gpu (256-byte aligned), then a fence; returns the fence seq or 0. */
+uint32_t vi_cq_dispatch(vi_cq *q, const amd_kernel *k, uint64_t code_gpu, uint64_t kernarg_gpu, uint32_t wg_size,
+                        uint32_t groups);
 
 #endif

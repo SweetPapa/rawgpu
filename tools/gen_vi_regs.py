@@ -66,6 +66,12 @@ REGS = [
     "RCU_UC_EVENTS", "SMC_MSG_ARG_1", "SMC_RESP_1", "SMC_MESSAGE_1",
     # thermal: smu7_thermal_get_temperature()
     "CG_MULT_THERMAL_STATUS",
+    # GFX v8 bring-up for compute: gfx_v8_0 golden settings (polaris10), constants, RLC, MEC queues
+    "ATC_MISC_CG", "CB_HW_CONTROL", "CB_HW_CONTROL_2", "CB_HW_CONTROL_3", "DB_DEBUG2", "PA_SC_ENHANCE",
+    "PA_SC_LINE_STIPPLE_STATE", "PA_SC_RASTER_CONFIG", "PA_SC_RASTER_CONFIG_1", "RLC_CGCG_CGLS_CTRL_3D",
+    "SQ_CONFIG", "TA_CNTL_AUX", "TCC_CTRL", "TCP_ADDR_CONFIG", "TCP_CHAN_STEER_HI", "VGT_RESET_DEBUG",
+    "SPI_RESOURCE_RESERVE_CU_0", "SPI_RESOURCE_RESERVE_CU_1", "SPI_RESOURCE_RESERVE_EN_CU_0",
+    "SPI_RESOURCE_RESERVE_EN_CU_1", "CG_ACLK_CNTL", "GRBM_CNTL", "SH_STATIC_MEM_CONFIG",
 ]
 
 DEFINE = re.compile(r"^#define\s+(\S+)\s+(0x[0-9a-fA-F]+|\d+)[uUlL]*\s*$")

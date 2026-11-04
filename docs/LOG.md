@@ -2,6 +2,55 @@
 
 Dated, factual notes from real hardware. Newest first.
 
+## 2026-11-04: stage 4, a compute queue and the first kernel
+
+Same host, enclosure and card, posted and with `smc-load` done. The commands
+below ran in this order, several times each.
+
+**`rawgpu compute-test`** (`src/amd_vi_gfx.c`):
+
+```
+GFX:          golden registers, VMID0 SH_MEM, RLC resumed (RLC_CNTL 0x00000001), doorbells on (BAR2 2 MB)
+queue:        ME1 pipe 0 queue 0, VMID0, doorbell 16; ring 64 KB, MQD and EOP in VRAM; HQD active
+[1] ring:         SET_UCONFIG_REG landed in SCRATCH_REG0
+[2] VRAM write:   WRITE_DATA + RELEASE_MEM fence 1; VRAM reads 0x600df00d (intact)
+[3] host write:   WRITE_DATA through the GART; host memory reads 0x5eed5eed (intact)
+[4] latency:      submit -> fence seen, best of 20: 117 us
+kernel:       vadd from build/kernels/vadd.o: 136 bytes of gfx803 code, 28-byte kernargs, RSRC1 0x00ac0041 RSRC2 0x0000008c
+[5] vadd host: 1048576 floats in 16384 groups of 64: matches the CPU; 5.86 ms submit-to-fence (2.1 GB/s of a, b, c)
+[6] vadd VRAM: 1048576 floats in 16384 groups of 64: matches the CPU; 0.46 ms submit-to-fence (27.2 GB/s of a, b, c)
+```
+
+- **The queue** is ME1 pipe 0 queue 0, in VMID0.
+  - It is loaded the way amdgpu loads its KIQ: `gfx_v8_0_mqd_init()`, then
+    `gfx_v8_0_mqd_commit()` with `cp_hqd_active` = 1. No KIQ or
+    `MAP_QUEUES` is involved.
+  - The write pointer goes to doorbell 16 (`AMDGPU_DOORBELL_MEC_RING0`) in
+    BAR2, an MMIO write through the socket like any other.
+  - A second run finds the queue drained by the first and reloads it.
+- **Latency:** a `WRITE_DATA` plus a fence makes the round trip in 96–117 µs
+  through the socket.
+- **The kernel** is `kernels/vadd.cl`, built by Homebrew clang 20.1.7
+  (`-target amdgcn-amd-amdhsa -mcpu=gfx803`, no device libraries, no linker).
+  - rawgpu reads `.text` and `vadd.kd` straight out of the relocatable object.
+    The descriptor's one relocation, its entry offset, is not needed, because
+    `COMPUTE_PGM_LO/HI` points at the code directly.
+  - The descriptor enables the private-segment-buffer user SGPRs (s0–s3, given
+    zeros) and the kernarg pointer (s4–s5).
+  - `RSRC2` asks for 6 user SGPRs plus the workgroup ID X.
+  - Global pointers compile to `flat_*` instructions. VMID0's
+    `SH_MEM_BASES` = 0 leaves the LDS and scratch apertures in the low 8 GB,
+    below every MC address rawgpu uses.
+- **Inputs** are exact in float, and the results are compared bit for bit with
+  the CPU. The VRAM output is pre-filled with `0xFF` bytes each run, so the
+  previous run's results cannot pass.
+- **Host-memory `vadd` is limited by the link:** 12 MB moves over
+  Thunderbolt. The VRAM run includes the ~100 µs submit overhead, at the boot
+  clocks (engine 300 MHz, memory 400 MHz).
+- `sdma-test` still passes after `compute-test`, at the same bandwidth.
+- After every run: no VM faults, no PCI/PCIe/AER errors, `GRBM_STATUS` idle.
+  The card was at 33 C.
+
 ## 2026-11-04: stage 3, SMC firmware loaded, SDMA moves data
 
 Same host, enclosure and card. After the restart (below) the card was cold, and

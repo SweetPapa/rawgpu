@@ -56,7 +56,7 @@ static uint32_t eng(int me) { return me ? SDMA1_OFFSET : 0; }
 
 /* ---- memory the engine shares with us ---- */
 
-static uint32_t mem_read32(vi_dev *v, const vi_mem *m, uint32_t off) {
+uint32_t vi_mem_read32(vi_dev *v, const vi_mem *m, uint32_t off) {
   if (m->cpu) return *(volatile uint32_t *)((uint8_t *)m->cpu + off);
   uint32_t x = 0xFFFFFFFFu;
   vi_hdp_invalidate(v); /* the engine's write may still sit behind HDP's read cache */
@@ -64,7 +64,7 @@ static uint32_t mem_read32(vi_dev *v, const vi_mem *m, uint32_t off) {
   return x;
 }
 
-static void mem_write(vi_dev *v, const vi_mem *m, uint64_t off, const void *src, size_t len) {
+void vi_mem_write(vi_dev *v, const vi_mem *m, uint64_t off, const void *src, size_t len) {
   if (m->cpu) { memcpy((uint8_t *)m->cpu + off, src, len); return; }
   if (!v->err) v->err = v->d->ops->mmio_write(v->d, VI_VRAM_BAR, m->bar + off, src, len);
 }
@@ -125,8 +125,8 @@ int vi_sdma_start(vi_sdma *s, vi_dev *v, int me, vi_mem ring, uint32_t ring_byte
   if (!s->shadow) return -ENOMEM;
   static const uint8_t zero[64];
   memset(s->shadow, 0, ring_bytes);
-  if (!ring.cpu) mem_write(v, &ring, 0, s->shadow, ring_bytes);
-  mem_write(v, &wb, 0, zero, sizeof zero);
+  if (!ring.cpu) vi_mem_write(v, &ring, 0, s->shadow, ring_bytes);
+  vi_mem_write(v, &wb, 0, zero, sizeof zero);
   vi_hdp_flush(v);
   uint32_t o = s->reg;
 
@@ -181,7 +181,7 @@ void vi_sdma_free(vi_sdma *s) {
 /* ---- ring ---- */
 
 static uint32_t ring_free(vi_sdma *s) {
-  uint32_t rptr = (mem_read32(s->v, &s->wb, WB_RPTR) >> 2) & (s->ring_dw - 1);
+  uint32_t rptr = (vi_mem_read32(s->v, &s->wb, WB_RPTR) >> 2) & (s->ring_dw - 1);
   return (rptr - s->wptr - 1) & (s->ring_dw - 1);
 }
 
@@ -206,8 +206,8 @@ static void ring_commit(vi_sdma *s) {
   while (s->wptr & (SDMA_ALIGN_DW - 1)) ring_put(s, SDMA_PKT_HEADER(SDMA_OP_NOP, 0));
   if (!s->ring.cpu) {
     uint32_t a = s->committed, b = s->wptr;
-    if (b < a) { mem_write(s->v, &s->ring, (uint64_t)a * 4, s->shadow + a, (size_t)(s->ring_dw - a) * 4); a = 0; }
-    if (b > a) mem_write(s->v, &s->ring, (uint64_t)a * 4, s->shadow + a, (size_t)(b - a) * 4);
+    if (b < a) { vi_mem_write(s->v, &s->ring, (uint64_t)a * 4, s->shadow + a, (size_t)(s->ring_dw - a) * 4); a = 0; }
+    if (b > a) vi_mem_write(s->v, &s->ring, (uint64_t)a * 4, s->shadow + a, (size_t)(b - a) * 4);
     vi_hdp_flush(s->v);
   }
   __atomic_thread_fence(__ATOMIC_SEQ_CST); /* ring contents before the write pointer */
@@ -230,11 +230,11 @@ static uint32_t emit_fence(vi_sdma *s) {
 int vi_sdma_wait(vi_sdma *s, uint32_t seq, unsigned timeout_ms) {
   double end = vi_now() + timeout_ms / 1e3;
   uint32_t f;
-  while ((int32_t)((f = mem_read32(s->v, &s->wb, WB_FENCE)) - seq) < 0) {
+  while ((int32_t)((f = vi_mem_read32(s->v, &s->wb, WB_FENCE)) - seq) < 0) {
     if (s->v->err) return s->v->err;
     if (vi_now() > end) {
       fprintf(stderr, "rawgpu: SDMA%d fence %u timed out (fence reads %u, rptr %u, wptr %u)\n", s->me, seq, f,
-              mem_read32(s->v, &s->wb, WB_RPTR) >> 2, s->wptr);
+              vi_mem_read32(s->v, &s->wb, WB_RPTR) >> 2, s->wptr);
       return -ETIMEDOUT;
     }
   }
@@ -247,7 +247,7 @@ int vi_sdma_wait(vi_sdma *s, uint32_t seq, unsigned timeout_ms) {
 int vi_sdma_ring_test(vi_sdma *s, uint64_t target_gpu, volatile uint32_t *target_cpu, int64_t target_bar) {
   vi_mem t = {.cpu = (void *)target_cpu, .bar = target_bar < 0 ? 0 : (uint64_t)target_bar, .gpu = target_gpu};
   uint32_t init = 0xCAFEDEADu;
-  mem_write(s->v, &t, 0, &init, 4);
+  vi_mem_write(s->v, &t, 0, &init, 4);
   vi_hdp_flush(s->v);
   int r = ring_reserve(s, 5);
   if (r) return r;
@@ -259,11 +259,11 @@ int vi_sdma_ring_test(vi_sdma *s, uint64_t target_gpu, volatile uint32_t *target
   ring_commit(s);
   double end = vi_now() + 0.5;
   uint32_t x;
-  while ((x = mem_read32(s->v, &t, 0)) != 0xDEADBEEFu) {
+  while ((x = vi_mem_read32(s->v, &t, 0)) != 0xDEADBEEFu) {
     if (s->v->err) return s->v->err;
     if (vi_now() > end) {
       fprintf(stderr, "rawgpu: SDMA%d write test: target still 0x%08x after 500 ms (rptr %u, wptr %u)\n", s->me, x,
-              mem_read32(s->v, &s->wb, WB_RPTR) >> 2, s->wptr);
+              vi_mem_read32(s->v, &s->wb, WB_RPTR) >> 2, s->wptr);
       return -ETIMEDOUT;
     }
   }

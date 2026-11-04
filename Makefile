@@ -1,8 +1,8 @@
 CC ?= clang
 CFLAGS ?= -O2 -g -std=gnu11 -Wall -Wextra -Wno-unused-parameter
 SRC := src/main.c src/transport_tinygpu.c src/pci.c src/family.c src/amd_atom.c src/amd_fw.c \
-       src/amd_vi.c src/amd_vi_gmc.c src/amd_vi_sdma.c src/amd_vi_smu.c
-HDR := src/rg.h src/amd_ids.inc src/atom/rg_atom.h src/amd_fw.h src/amd_vi.h src/amd_vi_regs.h src/amd_vi_regnames.inc
+       src/amd_vi.c src/amd_vi_gmc.c src/amd_vi_sdma.c src/amd_vi_smu.c src/amd_vi_gfx.c src/amd_kernel.c
+HDR := src/rg.h src/amd_ids.inc src/atom/rg_atom.h src/amd_fw.h src/amd_vi.h src/amd_vi_regs.h src/amd_vi_regnames.inc src/upstream/vi_structs.h src/amd_kernel.h
 
 # amdgpu's ATOM interpreter, compiled unmodified against the kernel shims.
 # -fno-strict-aliasing and -Wno-pointer-sign match how the kernel builds it.
@@ -34,7 +34,20 @@ regs:
 atom-names:
 	python3 -I tools/gen_atom_names.py src/atom/upstream/atombios.h > src/atom/rg_atom_names.inc
 
+# GPU kernels, compiled for gfx803 (Polaris) with an LLVM that has the AMDGPU
+# target (Homebrew's llvm does; Apple's clang does not). No device libraries
+# or linker are needed: rawgpu loads the relocatable object directly.
+AMDGPU_CLANG ?= /opt/homebrew/opt/llvm/bin/clang
+AMDGPU_CFLAGS := -x cl -cl-std=CL1.2 -target amdgcn-amd-amdhsa -mcpu=gfx803 -O2 -nogpulib
+KERNELS := build/kernels/vadd.o
+
+kernels: $(KERNELS)
+
+build/kernels/%.o: kernels/%.cl
+	@mkdir -p build/kernels
+	$(AMDGPU_CLANG) $(AMDGPU_CFLAGS) -c -o $@ $<
+
 clean:
 	rm -rf build
 
-.PHONY: ids regs atom-names clean
+.PHONY: ids regs atom-names kernels clean

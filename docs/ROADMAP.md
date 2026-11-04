@@ -98,24 +98,46 @@ Recovery notes:
   device stuck mid-teardown. Unplugging the cable then froze the Mac, and only
   a restart cleared it. Prefer restarting the Mac with the enclosure on.
 
-## Stage 4: compute queue and first dispatch
+## Stage 4: compute queue and first dispatch ✅ (2026-11-04)
 
-The reference is `gfx_v8_0.c`.
+The reference is `gfx_v8_0.c`, plus amdkfd's `kgd_hqd_load()`.
 
-- **RLC:** `gfx_v8_0_rlc_resume()` stops, resets and restarts the RLC that the
-  SMU left running. Leave clock and power gating off.
-- **MEC:** one compute queue on ME1 pipe 0. Build its MQD as
-  `gfx_v8_0_mqd_init()` does, then write the HQD registers directly as
-  `gfx_v8_0_mqd_commit()` does, with no KIQ. The ring and its write pointer
-  live in host memory or VRAM.
-- No interrupts: TinyGPU exposes no MSI path. Poll fences (`RELEASE_MEM`).
-- **Check 1:** a PM4 `WRITE_DATA` on the compute queue lands in memory.
-- Compile a kernel for `gfx803`. Homebrew LLVM has the target:
-  `clang -target amdgcn-amd-amdhsa -mcpu=gfx803`.
-- Load it into VRAM and submit `DISPATCH_DIRECT` through PM4 on the compute queue.
-- **Check 2:** a vector add matches the CPU result.
+- **GFX init for compute** (`src/amd_vi_gfx.c`):
+  - The Polaris 10 golden registers, then VMID0's shader memory config.
+  - `gfx_v8_0_rlc_resume()` stops, soft-resets and restarts the RLC the SMU
+    left running. Doorbells are on, and the GUI-idle interrupts stay off.
+- **One compute queue:** ME1 pipe 0 queue 0 in VMID0.
+  - The MQD is built as `gfx_v8_0_mqd_init()` does, and the HQD registers
+    are written from it as `gfx_v8_0_mqd_commit()` does. No KIQ is involved.
+  - The write pointer goes to a doorbell in BAR2. Fences are `RELEASE_MEM`,
+    polled; there are no interrupts.
+- **Kernels:** `make kernels` builds `kernels/*.cl` for gfx803 with Homebrew
+  LLVM. `src/amd_kernel.c` reads the code and kernel descriptor out of the
+  object, and `vi_cq_dispatch()` sets the `COMPUTE_*` state from it, then
+  `DISPATCH_DIRECT`.
+- **Check 1, passed:** a PM4 `WRITE_DATA` on the compute queue lands in VRAM
+  and in host memory. A fenced packet takes about 100 µs to round-trip.
+- **Check 2, passed:** `vadd` over 1M floats matches the CPU bit for bit.
+  - With buffers in Mac memory: 5.9 ms.
+  - With buffers in VRAM: 0.46 ms.
+
+Not supported yet, and refused by `vi_kernel_check()`: scratch (private
+segment), LDS (group segment), dispatch or queue pointers, and code that
+needs a linker.
 
 ## Stage 5: workloads
+
+Prerequisites, roughly in order:
+
+- **Clocks.** Everything runs at the VBIOS boot clocks: engine 300 MHz,
+  memory 400 MHz. Raising them means SMU DPM: the power-play tables from the
+  VBIOS, then `PPSMC_MSG_EnableDPM`-style messages, and fan and thermal limits
+  first. Temperature is already in `status`.
+- **Kernel features:** LDS sizing, scratch (`COMPUTE_TMPRING_SIZE` and a
+  private-segment buffer), and linked code objects, so real kernels run.
+- **A host API:** allocate VRAM and host buffers, upload by SDMA, launch,
+  wait. Then a small library, so a workload is a C program and not a
+  `compute-test` phase.
 
 Pick a narrow workload that fits 8 GB and Polaris's FP32 strength (6–7 TFLOPS,
 256 GB/s, no fast FP16), and that can run as a background job from the Mac:

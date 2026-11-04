@@ -9,8 +9,9 @@ Apple-signed DriverKit extension that hands raw PCIe access (config space, BAR
 MMIO, DMA buffers) to userspace. On top of that, rawgpu is a small C codebase
 that identifies the card and, family by family, brings it up.
 
-**Status:** stages 1–3 of 5 done; stage 4 (compute) is next. The first card
-is a PowerColor RX 590 (Polaris 30).
+**Status:** stages 1–4 of 5 done: the card runs compiled compute kernels.
+Stage 5 (clocks, a host API, real workloads) is next. The first card is a
+PowerColor RX 590 (Polaris 30).
 
 - **Posting works.** rawgpu posts the card from userspace: Linux amdgpu's own
   ATOM interpreter, unmodified, runs the VBIOS `ASIC_Init`. That brings up the
@@ -22,6 +23,10 @@ is a PowerColor RX 590 (Polaris 30).
   loads the SDMA, RLC and CP images from VRAM.
 - **DMA works.** Both SDMA engines copy host → VRAM at 2.8 GB/s and
   VRAM → host at 3.1 GB/s through the GART, verified word for word.
+- **Compute works.** One compute queue runs PM4 packets.
+  - A vector add written in OpenCL C and built for gfx803 by Homebrew LLVM
+    runs on the card and matches the CPU bit for bit.
+  - 1M floats take 0.46 ms in VRAM, still at the VBIOS boot clocks.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) and [docs/LOG.md](docs/LOG.md).
 
@@ -36,6 +41,8 @@ make
 ./build/rawgpu vram-test
 ./build/rawgpu smc-load       # SMC firmware + engine microcode, once per post
 ./build/rawgpu sdma-test      # DMA host <-> VRAM, with bandwidth
+make kernels                  # needs Homebrew llvm (brew install llvm)
+./build/rawgpu compute-test   # compute queue, PM4 writes, then the vadd kernel
 ```
 
 **Keep the Mac awake while the card holds state.** Sleep resets the card (the
@@ -62,6 +69,7 @@ Driver Extensions → TinyGPU. Check that it bound with
 | `rawgpu cfg [--clear-errors]` | Config space, plus PCI/PCIe/AER error status | Config reads (clearing writes the status bits) |
 | `rawgpu smc-load [--force]` | Starts the SMC firmware; it loads the SDMA, RLC and CP microcode from VRAM | **Writes**: SMC RAM, 8 MB of reserved VRAM. Lasts until the card loses power |
 | `rawgpu sdma-test [MB] ...` | GART + SDMA bring-up, copy and fill tests with timing (MB ≤ 127) | **Writes**: VM setup, VRAM, host buffers. Needs `smc-load` first |
+| `rawgpu compute-test [--kernel F]` | RLC/MEC bring-up, one compute queue, PM4 writes and fences, then `vadd` on 1M floats | **Writes**: GFX setup, VRAM, host buffers. Needs `smc-load` first |
 | `rawgpu soft-reset` | amdgpu's SDMA/MC soft reset for blocks that report busy | **Writes**; see the recovery notes in the roadmap |
 | `rawgpu reset`, `rawgpu asic-reset` | PCIe reset / amdgpu's PCI-config reset | **Writes**; neither had any effect on this card |
 
@@ -98,6 +106,10 @@ src/amd_vi.c             AMD GCN3/4 backend: register helpers, probe, VBIOS, pos
 src/amd_vi_gmc.c         GMC v8: VRAM placement and the VMID0 GART
 src/amd_vi_sdma.c        SDMA v3 rings, copies, fences; sdma-test
 src/amd_vi_smu.c         SMU7: SMC firmware start and SMU-loaded engine microcode; smc-load
+src/amd_vi_gfx.c         GFX v8: RLC/MEC bring-up, a compute queue, dispatch; compute-test
+src/amd_kernel.c         AMDGPU code objects: a kernel's code and descriptor
+src/upstream/            amdgpu structure headers, byte for byte (see UPSTREAM.md)
+kernels/                 GPU kernels (OpenCL C), built for gfx803 by `make kernels`
 src/amd_vi_regs.h        generated register subset (tools/gen_vi_regs.py)
 src/amd_fw.c             AMD firmware file loading and header checks
 src/amd_atom.c           ATOM BIOS header parsing

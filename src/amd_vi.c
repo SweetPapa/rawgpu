@@ -488,6 +488,7 @@ static int cmd_soft_reset(rg_dev *d, const rg_ident *id, int argc, char **argv) 
 
 int vi_cmd_sdma_test(rg_dev *d, const rg_ident *id, int argc, char **argv); /* amd_vi_sdma.c */
 int vi_cmd_smc_load(rg_dev *d, const rg_ident *id, int argc, char **argv);  /* amd_vi_smu.c */
+int vi_cmd_compute_test(rg_dev *d, const rg_ident *id, int argc, char **argv); /* amd_vi_gfx.c */
 
 static const rg_cmd vi_cmds[] = {
   {"status", "", "engine, VM and SMC state (read-only)", cmd_status},
@@ -502,6 +503,8 @@ static const rg_cmd vi_cmds[] = {
    "WRITES: start the SMC firmware and have it load the SDMA, RLC and CP microcode", vi_cmd_smc_load},
   {"sdma-test", "[MB] [--engine 0|1] [--vram-only] [--host-ring] [--fw DIR] [--trace FILE]",
    "WRITES: GART + SDMA bring-up, then DMA copies host<->VRAM with timing", vi_cmd_sdma_test},
+  {"compute-test", "[--trace FILE]", "WRITES: RLC + MEC bring-up, one compute queue, PM4 writes and fences",
+   vi_cmd_compute_test},
   {0},
 };
 
