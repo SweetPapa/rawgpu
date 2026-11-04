@@ -238,10 +238,16 @@ void vi_smu_report(vi_dev *v) {
       printf("SMU microcode loaded   unknown: firmware header gives soft registers at 0x%08x\n", s);
     }
   }
-  uint32_t sclk, mclk;
+  uint32_t sclk, mclk, fs = up ? vi_rsmc(v, ixFEATURE_STATUS) : 0;
+  bool dpm = REG_GET_FIELD(fs, FEATURE_STATUS, SCLK_DPM_ON) || REG_GET_FIELD(fs, FEATURE_STATUS, MCLK_DPM_ON);
+  if (up)
+    printf("DPM                    FEATURE_STATUS 0x%08x: engine DPM %s, memory DPM %s, voltage controller %s%s\n", fs,
+           REG_GET_FIELD(fs, FEATURE_STATUS, SCLK_DPM_ON) ? "on" : "off",
+           REG_GET_FIELD(fs, FEATURE_STATUS, MCLK_DPM_ON) ? "on" : "off",
+           REG_GET_FIELD(fs, FEATURE_STATUS, VOLTAGE_CONTROLLER_ON) ? "on" : "off", dpm ? "" : " (rawgpu dpm-enable)");
   if (up && !vi_smu_clocks(v, &sclk, &mclk))
-    printf("clocks (SMC report)    engine %u MHz, memory %u MHz: not reliable before DPM is set up (bench-compute measures)\n",
-           sclk, mclk);
+    printf("clocks (SMC report)    engine %u MHz, memory %u MHz%s\n", sclk, mclk,
+           dpm ? "" : ": not reliable before DPM is set up (bench-compute measures)");
   printf("temperature            %d C\n", vi_temp_c(v));
 }
 
@@ -326,14 +332,20 @@ static int smc_start_protected(vi_dev *v, const amd_fw *fw) {
   return 0;
 }
 
-/* The SMC firmware amdgpu_cgs_get_firmware_info() picks for a Polaris 10 board. */
-static const char *smc_fw_name(const rg_dev *d, bool hard_key) {
-  if (!hard_key) return "polaris10_smc_sk";
+static bool is_p20(const rg_dev *d) { /* ASICID_IS_P20 */
   uint16_t did = d->device, rid = d->revision;
-  bool p20 = (did == 0x67DF && (rid == 0xE3 || rid == 0xE4 || rid == 0xE5 || rid == 0xE7 || rid == 0xEF)) ||
-             (did == 0x6FDF && (rid == 0xE7 || rid == 0xEF || rid == 0xFF)); /* ASICID_IS_P20 */
-  bool p30 = did == 0x67DF && (rid == 0xE1 || rid == 0xF7);                  /* ASICID_IS_P30 */
-  return p20 ? "polaris10_k_smc" : p30 ? "polaris10_k2_smc" : "polaris10_smc";
+  return (did == 0x67DF && (rid == 0xE3 || rid == 0xE4 || rid == 0xE5 || rid == 0xE7 || rid == 0xEF)) ||
+         (did == 0x6FDF && (rid == 0xE7 || rid == 0xEF || rid == 0xFF));
+}
+static bool is_p30(const rg_dev *d) { return d->device == 0x67DF && (d->revision == 0xE1 || d->revision == 0xF7); }
+
+/* amdgpu_cgs_get_firmware_info() marks these "kicker" parts (info->is_kicker) */
+bool vi_smc_is_kicker(const rg_dev *d) { return is_p20(d) || is_p30(d); }
+
+/* The SMC firmware amdgpu_cgs_get_firmware_info() picks for a Polaris 10 board. */
+const char *vi_smc_fw_name(const rg_dev *d, bool hard_key) {
+  if (!hard_key) return "polaris10_smc_sk";
+  return is_p20(d) ? "polaris10_k_smc" : is_p30(d) ? "polaris10_k2_smc" : "polaris10_smc";
 }
 
 /* ---- engine microcode ---- */
@@ -541,7 +553,7 @@ int vi_cmd_smc_load(rg_dev *d, const rg_ident *id, int argc, char **argv) {
       r = -ENOTSUP;
       goto out;
     }
-    if ((r = amd_fw_load(&smc, fw_dir, smc_fw_name(d, hard)))) goto out;
+    if ((r = amd_fw_load(&smc, fw_dir, vi_smc_fw_name(d, hard)))) goto out;
     printf("SMC firmware: %s.bin v0x%x, %u bytes; SMU in protected mode, %s key\n", smc.name, smc.ucode_version,
            smc.ucode_dw * 4, hard ? "hard" : "soft");
     double t0 = vi_now();

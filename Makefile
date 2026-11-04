@@ -1,8 +1,8 @@
 CC ?= clang
 CFLAGS ?= -O2 -g -std=gnu11 -Wall -Wextra -Wno-unused-parameter
 SRC := src/main.c src/transport_tinygpu.c src/pci.c src/family.c src/amd_atom.c src/amd_fw.c \
-       src/amd_vi.c src/amd_vi_gmc.c src/amd_vi_sdma.c src/amd_vi_smu.c src/amd_vi_gfx.c src/amd_kernel.c src/amd_vi_ctx.c src/amd_vi_bench.c
-HDR := src/rg.h src/amd_ids.inc src/atom/rg_atom.h src/amd_fw.h src/amd_vi.h src/amd_vi_regs.h src/amd_vi_regnames.inc src/upstream/vi_structs.h src/amd_kernel.h src/amd_vi_ctx.h
+       src/amd_vi.c src/amd_vi_gmc.c src/amd_vi_sdma.c src/amd_vi_smu.c src/amd_vi_gfx.c src/amd_kernel.c src/amd_vi_ctx.c src/amd_vi_bench.c src/amd_vi_dpm.c
+HDR := src/rg.h src/amd_ids.inc src/atom/rg_atom.h src/amd_fw.h src/amd_vi.h src/amd_vi_regs.h src/amd_vi_regnames.inc src/upstream/vi_structs.h src/amd_kernel.h src/amd_vi_ctx.h src/pp/rg_pp.h
 
 # amdgpu's ATOM interpreter, compiled unmodified against the kernel shims.
 # -fno-strict-aliasing and -Wno-pointer-sign match how the kernel builds it.
@@ -11,9 +11,27 @@ ATOM_CFLAGS := -O2 -g -std=gnu11 -fno-strict-aliasing -Wno-pointer-sign \
                -Isrc/atom/shim -Isrc/atom/upstream -Isrc/atom
 ATOM_OBJ := build/atom.o build/rg_atom.o
 
-build/rawgpu: $(SRC) $(HDR) $(ATOM_OBJ)
+# amdgpu's SMU7/Polaris powerplay code, compiled unmodified against kernel shims
+# (src/pp/UPSTREAM.md), plus rawgpu's glue (src/pp/rg_pp*.c). The flags match how
+# the kernel builds it (-fno-strict-aliasing, -Wno-pointer-sign).
+PP := src/pp
+PP_UP := $(PP)/upstream
+PP_C := $(wildcard $(PP_UP)/hwmgr/*.c) $(wildcard $(PP_UP)/smumgr/*.c) $(PP)/rg_pp.c $(PP)/rg_pp_stubs.c
+PP_H := $(wildcard $(PP_UP)/*/*.h $(PP_UP)/include/*/*.h $(PP_UP)/include/*/*/*.h $(PP)/shim/*.h $(PP)/shim/*/*.h $(PP)/asic_reg/*/*.h) \
+        $(PP)/rg_pp.h src/atom/upstream/atom.h
+PP_CFLAGS := -O2 -g -std=gnu11 -fno-strict-aliasing -Wall -Wno-unused-parameter -Wno-pointer-sign -Wno-unused-variable \
+             -I$(PP) -I$(PP)/shim -I$(PP_UP)/hwmgr -I$(PP_UP)/smumgr -I$(PP_UP)/inc -I$(PP_UP)/include \
+             -I$(PP_UP)/legacy-dpm -Isrc/atom/upstream -I$(PP)/asic_reg
+PP_OBJ := $(addprefix build/pp/,$(notdir $(PP_C:.c=.o)))
+vpath %.c $(PP_UP)/hwmgr $(PP_UP)/smumgr $(PP)
+
+build/pp/%.o: %.c $(PP_H)
+	@mkdir -p build/pp
+	$(CC) $(PP_CFLAGS) -c -o $@ $<
+
+build/rawgpu: $(SRC) $(HDR) $(ATOM_OBJ) $(PP_OBJ)
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ $(SRC) $(ATOM_OBJ)
+	$(CC) $(CFLAGS) -o $@ $(SRC) $(ATOM_OBJ) $(PP_OBJ)
 
 build/atom.o: src/atom/upstream/atom.c src/atom/shim/rg_kcompat.h
 	@mkdir -p build

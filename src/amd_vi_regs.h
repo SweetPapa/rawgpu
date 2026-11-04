@@ -1511,6 +1511,62 @@
 #define DB_DEBUG2__ENABLE_SUBTILE_GROUPING_MASK              0x8000
 #define DB_DEBUG2__ENABLE_SUBTILE_GROUPING__SHIFT            0xf
 
+#define mmDIDT_IND_DATA                                      0x3281  /* gca/gfx_8_0 */
+#define DIDT_IND_DATA__DIDT_IND_DATA_MASK                    0xffffffff
+#define DIDT_IND_DATA__DIDT_IND_DATA__SHIFT                  0x0
+
+#define mmDIDT_IND_INDEX                                     0x3280  /* gca/gfx_8_0 */
+#define DIDT_IND_INDEX__DIDT_IND_INDEX_MASK                  0xffffffff
+#define DIDT_IND_INDEX__DIDT_IND_INDEX__SHIFT                0x0
+
+#define ixFEATURE_STATUS                                     0x3f010  /* smu/smu_7_1_3 */
+#define FEATURE_STATUS__ACP_DPM_ON_MASK                      0x40
+#define FEATURE_STATUS__ACP_DPM_ON__SHIFT                    0x6
+#define FEATURE_STATUS__AVS_ON_MASK                          0x10000
+#define FEATURE_STATUS__AVS_ON__SHIFT                        0x10
+#define FEATURE_STATUS__BAPM_ON_MASK                         0x100
+#define FEATURE_STATUS__BAPM_ON__SHIFT                       0x8
+#define FEATURE_STATUS__GPU_CAC_ON_MASK                      0x8000
+#define FEATURE_STATUS__GPU_CAC_ON__SHIFT                    0xf
+#define FEATURE_STATUS__LCLK_DPM_FORCED_MASK                 0x100000
+#define FEATURE_STATUS__LCLK_DPM_FORCED__SHIFT               0x14
+#define FEATURE_STATUS__LCLK_DPM_ON_MASK                     0x4
+#define FEATURE_STATUS__LCLK_DPM_ON__SHIFT                   0x2
+#define FEATURE_STATUS__LHTC_ON_MASK                         0x800
+#define FEATURE_STATUS__LHTC_ON__SHIFT                       0xb
+#define FEATURE_STATUS__LPMX_ON_MASK                         0x200
+#define FEATURE_STATUS__LPMX_ON__SHIFT                       0x9
+#define FEATURE_STATUS__MCLK_DPM_FORCED_MASK                 0x80000
+#define FEATURE_STATUS__MCLK_DPM_FORCED__SHIFT               0x13
+#define FEATURE_STATUS__MCLK_DPM_ON_MASK                     0x2
+#define FEATURE_STATUS__MCLK_DPM_ON__SHIFT                   0x1
+#define FEATURE_STATUS__NBDPM_ON_MASK                        0x400
+#define FEATURE_STATUS__NBDPM_ON__SHIFT                      0xa
+#define FEATURE_STATUS__PCIE_DPM_FORCED_MASK                 0x200000
+#define FEATURE_STATUS__PCIE_DPM_FORCED__SHIFT               0x15
+#define FEATURE_STATUS__PCIE_DPM_ON_MASK                     0x80
+#define FEATURE_STATUS__PCIE_DPM_ON__SHIFT                   0x7
+#define FEATURE_STATUS__RESERVED_MASK                        0xffc00000
+#define FEATURE_STATUS__RESERVED__SHIFT                      0x16
+#define FEATURE_STATUS__SAMU_DPM_ON_MASK                     0x20
+#define FEATURE_STATUS__SAMU_DPM_ON__SHIFT                   0x5
+#define FEATURE_STATUS__SCLK_DPM_FORCED_MASK                 0x40000
+#define FEATURE_STATUS__SCLK_DPM_FORCED__SHIFT               0x12
+#define FEATURE_STATUS__SCLK_DPM_ON_MASK                     0x1
+#define FEATURE_STATUS__SCLK_DPM_ON__SHIFT                   0x0
+#define FEATURE_STATUS__SPMI_ON_MASK                         0x20000
+#define FEATURE_STATUS__SPMI_ON__SHIFT                       0x11
+#define FEATURE_STATUS__TDC_LIMIT_ON_MASK                    0x4000
+#define FEATURE_STATUS__TDC_LIMIT_ON__SHIFT                  0xe
+#define FEATURE_STATUS__UVD_DPM_ON_MASK                      0x8
+#define FEATURE_STATUS__UVD_DPM_ON__SHIFT                    0x3
+#define FEATURE_STATUS__VCE_DPM_ON_MASK                      0x10
+#define FEATURE_STATUS__VCE_DPM_ON__SHIFT                    0x4
+#define FEATURE_STATUS__VOLTAGE_CONTROLLER_ON_MASK           0x2000
+#define FEATURE_STATUS__VOLTAGE_CONTROLLER_ON__SHIFT         0xd
+#define FEATURE_STATUS__VPC_ON_MASK                          0x1000
+#define FEATURE_STATUS__VPC_ON__SHIFT                        0xc
+
 #define ixFIRMWARE_FLAGS                                     0x3f000  /* smu/smu_7_1_3 */
 #define FIRMWARE_FLAGS__INTERRUPTS_ENABLED_MASK              0x1
 #define FIRMWARE_FLAGS__INTERRUPTS_ENABLED__SHIFT            0x0
@@ -1538,6 +1594,10 @@
 #define GB_ADDR_CONFIG__ROW_SIZE__SHIFT                      0x1c
 #define GB_ADDR_CONFIG__SHADER_ENGINE_TILE_SIZE_MASK         0x70000
 #define GB_ADDR_CONFIG__SHADER_ENGINE_TILE_SIZE__SHIFT       0x10
+
+#define mmGC_CAC_IND_DATA                                    0x129b  /* gca/gfx_8_0 */
+
+#define mmGC_CAC_IND_INDEX                                   0x129a  /* gca/gfx_8_0 */
 
 #define mmGC_USER_SHADER_ARRAY_CONFIG                        0x2270  /* gca/gfx_8_0 */
 #define GC_USER_SHADER_ARRAY_CONFIG__INACTIVE_CUS_MASK       0xffff0000
@@ -1868,6 +1928,14 @@
 #define MC_ARB_WTM_GRPWT_RD__GRP_EXT_MASK                    0xff0000
 #define MC_ARB_WTM_GRPWT_RD__GRP_EXT__SHIFT                  0x10
 
+#define mmMC_SEQ_IO_DEBUG_DATA                               0xa92  /* gmc/gmc_8_1 */
+#define MC_SEQ_IO_DEBUG_DATA__IO_DEBUG_DATA_MASK             0xffffffff
+#define MC_SEQ_IO_DEBUG_DATA__IO_DEBUG_DATA__SHIFT           0x0
+
+#define mmMC_SEQ_IO_DEBUG_INDEX                              0xa91  /* gmc/gmc_8_1 */
+#define MC_SEQ_IO_DEBUG_INDEX__IO_DEBUG_INDEX_MASK           0x1ff
+#define MC_SEQ_IO_DEBUG_INDEX__IO_DEBUG_INDEX__SHIFT         0x0
+
 #define mmMC_SEQ_MISC0                                       0xa80  /* gmc/gmc_8_1 */
 #define MC_SEQ_MISC0__VALUE_MASK                             0xffffffff
 #define MC_SEQ_MISC0__VALUE__SHIFT                           0x0
@@ -1891,6 +1959,10 @@
 #define MC_SEQ_SUP_CNTL__SINGLE_STEP__SHIFT                  0x1
 #define MC_SEQ_SUP_CNTL__SW_WAKE_MASK                        0x4
 #define MC_SEQ_SUP_CNTL__SW_WAKE__SHIFT                      0x2
+
+#define mmMC_SEQ_SUP_PGM                                     0xa33  /* gmc/gmc_8_1 */
+#define MC_SEQ_SUP_PGM__CNTL_MASK                            0xffffffff
+#define MC_SEQ_SUP_PGM__CNTL__SHIFT                          0x0
 
 #define mmMC_SEQ_TRAIN_WAKEUP_CNTL                           0xa3a  /* gmc/gmc_8_1 */
 #define MC_SEQ_TRAIN_WAKEUP_CNTL__AUTO_REFRESH_ADDR_TRAIN_MASK 0x100
@@ -2153,6 +2225,14 @@
 #define PA_SC_RASTER_CONFIG_1__SE_PAIR_XSEL__SHIFT           0x2
 #define PA_SC_RASTER_CONFIG_1__SE_PAIR_YSEL_MASK             0x30
 #define PA_SC_RASTER_CONFIG_1__SE_PAIR_YSEL__SHIFT           0x4
+
+#define mmPCIE_DATA                                          0xf  /* bif/bif_5_0 */
+#define PCIE_DATA__PCIE_DATA_MASK                            0xffffffff
+#define PCIE_DATA__PCIE_DATA__SHIFT                          0x0
+
+#define mmPCIE_INDEX                                         0xe  /* bif/bif_5_0 */
+#define PCIE_INDEX__PCIE_INDEX_MASK                          0xffffffff
+#define PCIE_INDEX__PCIE_INDEX__SHIFT                        0x0
 
 #define ixRCU_UC_EVENTS                                      0xc0000004  /* smu/smu_7_1_3 */
 #define RCU_UC_EVENTS__BREAK_PT1_ACTIVE_MASK                 0x200

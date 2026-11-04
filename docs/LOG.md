@@ -2,6 +2,72 @@
 
 Dated, factual notes from real hardware. Newest first.
 
+## 2026-11-04: stage 5, amdgpu's power management runs; memory DPM wedged the card
+
+Same setup, posted and with `smc-load` done.
+
+**`rawgpu dpm-info`** (`src/pp/`, amdgpu's powerplay code compiled unmodified,
+docs/DPM.md) parsed the VBIOS PowerPlay table and ran the EVV voltage lookups:
+
+```
+card:         a kicker part, SMC firmware 0x00170400, reference clock 25.00 MHz, PCIe Gen3 x4 (GPU: Gen3), 256-bit GDDR5, 36 CUs
+engine clock levels (vdd_dep_on_sclk):
+  [0]  300 MHz  VDDC 0.750 V    [1]  909 MHz  0.800 V    [2] 1134 MHz  0.837 V    [3] 1266 MHz  0.850 V
+  [4] 1365 MHz  VDDC 0.900 V    [5] 1432 MHz  0.950 V    [6] 1490 MHz  1.000 V    [7] 1545 MHz  1.018 V
+memory clock levels (vdd_dep_on_mclk):  400 MHz, 1000 MHz, 2000 MHz (VDDC 0.750 / 1.150 / 1.150 V)
+EVV leakage voltages (VBIOS GetVoltageInfo): 0xff02=0.837 V 0xff03=1.018 V 0xff04=1.162 V 0xff05..08=1.150 V
+limits on AC: engine 1545 MHz, memory 2000 MHz, VDDC 1.162 V; TDP 185 W, max power delivery 175 W
+fan: present; curve 40 C -> 20%, 65 C -> 40%, 85 C -> 60%
+```
+
+(The output is condensed here; `dpm-info` prints one level per line.)
+
+**`rawgpu dpm-enable`** ran `hwmgr_hw_init()` in 0.28 s.
+
+- `FEATURE_STATUS` read `0x0000e003`: engine DPM, memory DPM, the voltage
+  controller, the TDC limit and GPU CAC were on.
+- Feature mask: amdgpu's default without PCIe DPM and AVFS.
+- One warning: "Failed to populate edc leakage registers!" The SMC refused
+  the EDC enable/disable message.
+- Idle, the SMC reported 285 MHz engine, 400 MHz memory, 32 C, 3.1 W.
+  `status` then showed 300 / 400 MHz.
+
+**Then the card wedged.** The next command was `bench-compute`.
+
+- Its context setup ran `vi_gmc_init()`: the MC programming, then 512 KB of
+  GART table zeroed through BAR0.
+- Its SDMA microcode check then found SDMA0's RAM differing from the image at
+  dword 0. It had matched before DPM was on.
+- After that, config reads got no answer (`no device answered config reads`),
+  as in the earlier wedge. The `display@0` device and TinyGPU's binding stayed
+  registered.
+
+**What amdgpu does that rawgpu had not:**
+
+- `gmc_v8_0_hw_init()` loads the driver's MC sequencer firmware on every
+  Polaris (`gmc_v8_0_polaris_mc_load_microcode()`, `polaris10_k_mc.bin` for P30)
+  and retrains memory, before power management starts. rawgpu had left the
+  VBIOS's MC program in place and then let the SMC switch memory clocks.
+- amdgpu programs the MC once, at hw_init. rawgpu re-ran `mc_program()` in a
+  new process with DPM live.
+
+The likely sequence: memory traffic made the SMC switch the memory clock,
+and the switch failed without the driver's MC firmware. This is not
+confirmed: no trace was running during `bench-compute`.
+
+**Changes:**
+
+- New `rawgpu mc-load`, a port of `gmc_v8_0_polaris_mc_load_microcode()`.
+  It refuses to run while memory DPM is on.
+- `dpm-enable` refuses unless the MC firmware version register (IO debug
+  index `0x9F`, as `smu7_get_mc_microcode_version()` reads it) matches the
+  driver's file.
+- `vi_gmc_init()` leaves a live GART's MC setup alone. Each process only
+  rewrites the table and the fault page.
+- `dpm-enable --no-mclk` turns on engine DPM alone, for a staged test.
+
+Order from power-on: `post`, `mc-load`, `smc-load`, `dpm-enable`.
+
 ## 2026-11-04: stage 5 begins: host API, LDS, and what boot clocks give
 
 Same setup. `rawgpu bench-compute` (`src/amd_vi_bench.c`) runs entirely on

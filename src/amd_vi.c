@@ -240,6 +240,8 @@ static rg_atom *open_atom(rg_dev *d, FILE *trace, bool trace_ops) {
   return a;
 }
 
+rg_atom *vi_atom_open(rg_dev *d, FILE *trace, bool trace_ops) { return open_atom(d, trace, trace_ops); }
+
 static int cmd_atom_info(rg_dev *d, const rg_ident *id, int argc, char **argv) {
   (void)id; (void)argc; (void)argv;
   rg_atom *a = open_atom(d, NULL, false);
@@ -486,10 +488,45 @@ static int cmd_soft_reset(rg_dev *d, const rg_ident *id, int argc, char **argv) 
   return v.err;
 }
 
+/* `rawgpu mc-load`: the driver's MC sequencer firmware, as amdgpu loads it on
+ * every Polaris before power management starts. Run it after `post` and
+ * before `smc-load`: it retrains memory, so nothing in VRAM survives. */
+static int cmd_mc_load(rg_dev *d, const rg_ident *id, int argc, char **argv) {
+  const char *fw_dir = argc == 2 && !strcmp(argv[0], "--fw") ? argv[1] : NULL;
+  if (argc && !fw_dir) return -EINVAL;
+  if (!id->chip || strcmp(id->chip, "POLARIS10")) { fprintf(stderr, "rawgpu: mc-load is only wired up for POLARIS10\n"); return -ENOTSUP; }
+  vi_dev v;
+  int r = vi_open(&v, d);
+  if (r) return r;
+  uint32_t memsize;
+  if (!vi_posted(&v, &memsize)) {
+    if (!v.err) fprintf(stderr, "rawgpu: card is not posted; run `rawgpu post` first\n");
+    return v.err ? v.err : -EIO;
+  }
+  if (vi_smc_running(&v) && REG_GET_FIELD(vi_rsmc(&v, ixFEATURE_STATUS), FEATURE_STATUS, MCLK_DPM_ON)) {
+    fprintf(stderr, "rawgpu: memory clock DPM is on; reloading the MC firmware under it is not safe.\n"
+                    "        Power-cycle the card, then post, mc-load, smc-load, dpm-enable.\n");
+    return -EBUSY;
+  }
+  amd_fw fw;
+  if ((r = amd_fw_load(&fw, fw_dir, vi_mc_fw_name(d)))) return r;
+  uint32_t before = vi_mc_ucode_version(&v);
+  double train = 0;
+  r = vi_mc_load_ucode(&v, &fw, &train);
+  uint32_t after = vi_mc_ucode_version(&v);
+  printf("MC firmware:  %s.bin v0x%08x, %u dwords + %u IO registers; version register 0x%08x -> 0x%08x; "
+         "training %s after %.1f ms (MC_SEQ_MISC0 0x%08x)\n", fw.name, fw.ucode_version, fw.ucode_dw,
+         amd_fw_hdr32(&fw, 32) / 8, before, after, r ? "NOT done" : "done", train * 1e3, vi_rreg(&v, mmMC_SEQ_MISC0));
+  amd_fw_free(&fw);
+  return r ? r : v.err;
+}
+
 int vi_cmd_sdma_test(rg_dev *d, const rg_ident *id, int argc, char **argv); /* amd_vi_sdma.c */
 int vi_cmd_smc_load(rg_dev *d, const rg_ident *id, int argc, char **argv);  /* amd_vi_smu.c */
 int vi_cmd_compute_test(rg_dev *d, const rg_ident *id, int argc, char **argv); /* amd_vi_gfx.c */
 int vi_cmd_bench_compute(rg_dev *d, const rg_ident *id, int argc, char **argv); /* amd_vi_bench.c */
+int vi_cmd_dpm_info(rg_dev *d, const rg_ident *id, int argc, char **argv);      /* amd_vi_dpm.c */
+int vi_cmd_dpm_enable(rg_dev *d, const rg_ident *id, int argc, char **argv);    /* amd_vi_dpm.c */
 
 static const rg_cmd vi_cmds[] = {
   {"status", "", "engine, VM and SMC state (read-only)", cmd_status},
@@ -500,12 +537,19 @@ static const rg_cmd vi_cmds[] = {
   {"post", "[--trace FILE] [--trace-ops] [--force]", "WRITES: run the VBIOS ASIC_Init so the card's memory works",
    cmd_post},
   {"vram-test", "[--enable-fb]", "WRITES VRAM: pattern test through BAR0 (needs a posted card)", cmd_vram_test},
+  {"mc-load", "[--fw DIR]", "WRITES: the driver's MC sequencer firmware (after post, before smc-load; retrains memory)",
+   cmd_mc_load},
   {"smc-load", "[--fw DIR] [--force] [--trace FILE]",
    "WRITES: start the SMC firmware and have it load the SDMA, RLC and CP microcode", vi_cmd_smc_load},
   {"sdma-test", "[MB] [--engine 0|1] [--vram-only] [--host-ring] [--fw DIR] [--trace FILE]",
    "WRITES: GART + SDMA bring-up, then DMA copies host<->VRAM with timing", vi_cmd_sdma_test},
   {"compute-test", "[--trace FILE]", "WRITES: RLC + MEC bring-up, one compute queue, PM4 writes and fences",
    vi_cmd_compute_test},
+  {"dpm-info", "[-v]", "PowerPlay table and EVV voltages, parsed by amdgpu's powerplay code (no clock or SMC writes)",
+   vi_cmd_dpm_info},
+  {"dpm-enable", "[--no-mclk] [--level auto|low|high] [-v] [--trace FILE]",
+   "WRITES: amdgpu's power management: DPM tables into the SMC, clock/voltage DPM, fan and power limits on",
+   vi_cmd_dpm_enable},
   {"bench-compute", "[--sgemm N] [--kernels DIR]",
    "WRITES: host API end to end: copy bandwidth, FP32 FMA rate, LDS-tiled SGEMM, each checked on the CPU",
    vi_cmd_bench_compute},

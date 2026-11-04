@@ -73,6 +73,11 @@ REGS = [
     "SPI_RESOURCE_RESERVE_CU_0", "SPI_RESOURCE_RESERVE_CU_1", "SPI_RESOURCE_RESERVE_EN_CU_0",
     "SPI_RESOURCE_RESERVE_EN_CU_1", "CG_ACLK_CNTL", "GRBM_CNTL", "SH_STATIC_MEM_CONFIG",
     "CC_GC_SHADER_ARRAY_CONFIG", "GC_USER_SHADER_ARRAY_CONFIG",
+    # indirect spaces for powerplay (vi_pcie_rreg(), vi_didt_rreg(), vi_gc_cac_rreg())
+    "PCIE_INDEX", "PCIE_DATA", "DIDT_IND_INDEX", "DIDT_IND_DATA", "GC_CAC_IND_INDEX", "GC_CAC_IND_DATA",
+    "FEATURE_STATUS",
+    # MC sequencer firmware (gmc_v8_0_polaris_mc_load_microcode())
+    "MC_SEQ_IO_DEBUG_INDEX", "MC_SEQ_IO_DEBUG_DATA", "MC_SEQ_SUP_PGM",
 ]
 
 DEFINE = re.compile(r"^#define\s+(\S+)\s+(0x[0-9a-fA-F]+|\d+)[uUlL]*\s*$")

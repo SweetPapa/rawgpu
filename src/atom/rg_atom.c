@@ -159,6 +159,22 @@ int rg_atom_fw_vram_reserve(rg_atom *a, uint32_t *start, uint32_t *kb) {
   return 0;
 }
 
+void *rg_atom_context(rg_atom *a) { return a->ctx; }
+
+const uint8_t *rg_atom_bios(rg_atom *a, size_t *len) {
+  *len = a->bios_len;
+  return a->bios;
+}
+
+int rg_atom_ref_clock(rg_atom *a, uint32_t *ref_10khz) {
+  uint16_t off;
+  if (!amdgpu_atom_parse_data_header(a->ctx, GetIndexIntoMasterTable(DATA, FirmwareInfo), NULL, NULL, NULL, &off))
+    return -1;
+  const ATOM_FIRMWARE_INFO *fw = (const void *)(a->bios + off);
+  *ref_10khz = fw->usReferenceClock;
+  return 0;
+}
+
 void rg_atom_print_info(rg_atom *a) {
   struct atom_context *c = a->ctx;
   printf("  ATOM BIOS:       %s, %s\n", (char *)c->name, (char *)c->vbios_ver_str);

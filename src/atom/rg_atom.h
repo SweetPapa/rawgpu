@@ -31,6 +31,13 @@ int rg_atom_default_clocks(rg_atom *a, uint32_t *sclk_10khz, uint32_t *mclk_10kh
 /* first VRAM_UsageByFirmware entry: where the VBIOS keeps its own scratch in VRAM */
 int rg_atom_fw_vram_reserve(rg_atom *a, uint32_t *start, uint32_t *kb);
 
+/* For code that drives the interpreter itself (src/pp: amdgpu's powerplay):
+ * the struct atom_context *, and the BIOS image it parsed. */
+void *rg_atom_context(rg_atom *a);
+const uint8_t *rg_atom_bios(rg_atom *a, size_t *len);
+/* FirmwareInfo usReferenceClock in 10 kHz units, as amdgpu_atombios_get_clock_info() reads it */
+int rg_atom_ref_clock(rg_atom *a, uint32_t *ref_10khz);
+
 /* Runs ASIC_Init with the BIOS default clocks, as amdgpu_atom_asic_init() does.
  * 0 = success; 1 = the BIOS lacks clocks or the table; <0 = interpreter or transport failure. */
 int rg_atom_asic_init(rg_atom *a, rg_atom_stats *st);

@@ -68,6 +68,10 @@ uint32_t vi_gmc_soft_reset(vi_dev *v);
 /* CPU writes to VRAM through BAR0 (offset < BAR size). Follow with vi_hdp_flush()
  * before an engine reads the data. */
 int vi_vram_write(vi_dev *v, uint64_t off, const void *src, size_t len);
+/* MC sequencer firmware, as gmc_v8_0_polaris_mc_load_microcode() loads it */
+const char *vi_mc_fw_name(const rg_dev *d);
+uint32_t vi_mc_ucode_version(vi_dev *v);
+int vi_mc_load_ucode(vi_dev *v, const amd_fw *fw, double *train_s);
 int vi_vram_zero(vi_dev *v, uint64_t off, size_t len);
 
 /* ---- SMU7: SMC firmware and SMU-loaded engine microcode (amd_vi_smu.c) ---- */
@@ -86,6 +90,10 @@ int vi_smu_ucode_status(vi_dev *v, uint32_t *status); /* UcodeLoadStatus; -ENODE
 int vi_temp_c(vi_dev *v);                             /* GPU temperature in degrees C */
 int vi_smu_clocks(vi_dev *v, uint32_t *sclk_mhz, uint32_t *mclk_mhz); /* as the SMC reports them */
 void vi_smu_report(vi_dev *v);
+const char *vi_smc_fw_name(const rg_dev *d, bool hard_key); /* the image amdgpu would load */
+bool vi_smc_is_kicker(const rg_dev *d);
+struct rg_atom;
+struct rg_atom *vi_atom_open(rg_dev *d, FILE *trace, bool trace_ops); /* the VBIOS interpreter, as `post` uses it */
 
 /* ---- SDMA v3 (amd_vi_sdma.c) ---- */
 

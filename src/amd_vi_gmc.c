@@ -177,8 +177,17 @@ int vi_gmc_init(vi_dev *v, vi_gart *g, uint64_t dummy_page_bus) {
   else g->gart_start = MC_MASK - g->gart_size + 1;
   g->gart_start &= ~(FOUR_GB - 1);
 
-  vi_program_sequence(v, golden_polaris10, sizeof golden_polaris10 / sizeof golden_polaris10[0]);
-  mc_program(v, g);
+  /* A GART this process's predecessor enabled (same table, same range) keeps its
+   * memory-controller setup: amdgpu programs the MC once, at hw_init, and
+   * reprogramming it while the SMC switches memory clocks is not something
+   * amdgpu ever does. Only the table and the fault page are per process. */
+  bool live = REG_GET_FIELD(vi_rreg(v, mmVM_CONTEXT0_CNTL), VM_CONTEXT0_CNTL, ENABLE_CONTEXT) &&
+              vi_rreg(v, mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR) == (uint32_t)((g->vram_start + VI_VRAM_GART_TABLE) >> 12) &&
+              vi_rreg(v, mmVM_CONTEXT0_PAGE_TABLE_START_ADDR) == (uint32_t)(g->gart_start >> 12);
+  if (!live) {
+    vi_program_sequence(v, golden_polaris10, sizeof golden_polaris10 / sizeof golden_polaris10[0]);
+    mc_program(v, g);
+  }
   if (v->err) return v->err;
 
   /* Stale VRAM can look like valid PTEs, so clear the whole table before enabling it. */
@@ -186,7 +195,12 @@ int vi_gmc_init(vi_dev *v, vi_gart *g, uint64_t dummy_page_bus) {
   if (!r) r = vi_vram_zero(v, VI_VRAM_SCRATCH, 4096);
   if (r) return r;
   vi_hdp_flush(v);
-  gart_enable(v, g, dummy_page_bus);
+  if (live) {
+    vi_wreg(v, mmVM_CONTEXT0_PROTECTION_FAULT_DEFAULT_ADDR, (uint32_t)(dummy_page_bus >> 12));
+    tlb_flush_vmid0(v);
+  } else {
+    gart_enable(v, g, dummy_page_bus);
+  }
   return v->err;
 }
 
@@ -272,4 +286,48 @@ void vi_gmc_report(vi_dev *v) {
     if (regs[i].page) printf("   MC 0x%010llx", (unsigned long long)x << 12);
     printf("\n");
   }
+}
+
+/* ---- MC sequencer firmware ---- */
+
+/* amdgpu's choice for Polaris 10 (gmc_v8_0_init_microcode()): the "k" image for P30 parts */
+const char *vi_mc_fw_name(const rg_dev *d) {
+  return d->device == 0x67DF && (d->revision == 0xE1 || d->revision == 0xF7) ? "polaris10_k_mc" : "polaris10_mc";
+}
+
+/* smu7_get_mc_microcode_version() */
+uint32_t vi_mc_ucode_version(vi_dev *v) {
+  vi_wreg(v, mmMC_SEQ_IO_DEBUG_INDEX, 0x9F);
+  return vi_rreg(v, mmMC_SEQ_IO_DEBUG_DATA);
+}
+
+/* gmc_v8_0_polaris_mc_load_microcode(), which amdgpu runs on every Polaris in
+ * gmc_v8_0_hw_init(), before power management starts. The VBIOS posts the card
+ * with its own MC sequencer program; the driver's adds what memory clock
+ * switching needs. Loading it retrains memory, so VRAM contents do not survive. */
+int vi_mc_load_ucode(vi_dev *v, const amd_fw *fw, double *train_s) {
+  /* mc_firmware_header_v1_0: common header, then io_debug_size_bytes, io_debug_array_offset_bytes */
+  uint32_t io_bytes = amd_fw_hdr32(fw, 32), io_off = amd_fw_hdr32(fw, 36);
+  if (amd_fw_hdr32(fw, 4) < 40 || io_bytes % 8 || (uint64_t)io_off + io_bytes > fw->size) {
+    fprintf(stderr, "rawgpu: %s: IO register list (%u bytes at %u) is outside the file\n", fw->name, io_bytes, io_off);
+    return -EINVAL;
+  }
+  const uint32_t *io = (const uint32_t *)(fw->data + io_off);
+  uint32_t data = vi_rreg(v, mmMC_SEQ_MISC0);
+  vi_wreg(v, mmMC_SEQ_MISC0, data & ~0x40u);
+  for (uint32_t i = 0; i < io_bytes / 8; i++) { /* load mc io regs */
+    vi_wreg(v, mmMC_SEQ_IO_DEBUG_INDEX, io[2 * i]);
+    vi_wreg(v, mmMC_SEQ_IO_DEBUG_DATA, io[2 * i + 1]);
+  }
+  vi_wreg(v, mmMC_SEQ_SUP_CNTL, 0x00000008);
+  vi_wreg(v, mmMC_SEQ_SUP_CNTL, 0x00000010);
+  for (uint32_t i = 0; i < fw->ucode_dw; i++) vi_wreg(v, mmMC_SEQ_SUP_PGM, fw->ucode[i]);
+  vi_wreg(v, mmMC_SEQ_SUP_CNTL, 0x00000008); /* put the engine back into the active state */
+  vi_wreg(v, mmMC_SEQ_SUP_CNTL, 0x00000004);
+  vi_wreg(v, mmMC_SEQ_SUP_CNTL, 0x00000001);
+  double t0 = vi_now();
+  int r = vi_wait(v, mmMC_SEQ_MISC0, 0x80, 0x80, 1000000); /* wait for training to complete */
+  *train_s = vi_now() - t0;
+  if (r == -ETIMEDOUT) fprintf(stderr, "rawgpu: MC training did not report done (MC_SEQ_MISC0 0x%08x)\n", vi_rreg(v, mmMC_SEQ_MISC0));
+  return r;
 }

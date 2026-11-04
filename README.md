@@ -45,6 +45,7 @@ make
 ./build/rawgpu probe
 ./build/rawgpu post           # after each power-on of the card, and after the Mac sleeps
 ./build/rawgpu vram-test
+./build/rawgpu mc-load        # the driver's MC firmware, as amdgpu loads it (before smc-load)
 ./build/rawgpu smc-load       # SMC firmware + engine microcode, once per post
 ./build/rawgpu sdma-test      # DMA host <-> VRAM, with bandwidth
 make kernels                  # needs Homebrew llvm (brew install llvm)
@@ -74,6 +75,9 @@ Driver Extensions → TinyGPU. Check that it bound with
 | `rawgpu status` | Engine, VM, SMC and microcode state; temperature | Reads only |
 | `rawgpu regs PATTERN...` | Reads registers by name, e.g. `'SDMA0_*'` | Reads only; skips data ports unless named exactly |
 | `rawgpu cfg [--clear-errors]` | Config space, plus PCI/PCIe/AER error status | Config reads (clearing writes the status bits) |
+| `rawgpu mc-load` | The driver's MC sequencer firmware, as amdgpu loads it before power management; retrains memory | **Writes**: MC sequencer. Run after `post`, before `smc-load` |
+| `rawgpu dpm-info` | The PowerPlay table and EVV voltages, parsed by amdgpu's own powerplay code | VBIOS GetVoltageInfo only; no clock or SMC writes |
+| `rawgpu dpm-enable [--no-mclk] [--level L]` | amdgpu's `hwmgr_hw_init()`: DPM, voltage control, fan and power limits in the SMC | **Writes**: SMC tables and clocks/voltages. Experimental; see docs/DPM.md |
 | `rawgpu smc-load [--force]` | Starts the SMC firmware; it loads the SDMA, RLC and CP microcode from VRAM | **Writes**: SMC RAM, 8 MB of reserved VRAM. Lasts until the card loses power |
 | `rawgpu sdma-test [MB] ...` | GART + SDMA bring-up, copy and fill tests with timing (MB ≤ 127) | **Writes**: VM setup, VRAM, host buffers. Needs `smc-load` first |
 | `rawgpu compute-test [--kernel F]` | RLC/MEC bring-up, one compute queue, PM4 writes and fences, then `vadd` on 1M floats | **Writes**: GFX setup, VRAM, host buffers. Needs `smc-load` first |
@@ -118,6 +122,8 @@ src/amd_vi_gfx.c         GFX v8: RLC/MEC bring-up, a compute queue, dispatch; co
 src/amd_kernel.c         AMDGPU code objects: a kernel's code and descriptor
 src/amd_vi_ctx.c         host API: context, buffers, SDMA transfers, kernel launch
 src/amd_vi_bench.c       bench-compute, written only against the host API
+src/amd_vi_dpm.c         dpm-info, dpm-enable: the host side of src/pp
+src/pp/                  amdgpu's SMU7/Polaris powerplay code, unmodified, with shims (see UPSTREAM.md)
 src/upstream/            amdgpu structure headers, byte for byte (see UPSTREAM.md)
 kernels/                 GPU kernels (OpenCL C), built for gfx803 by `make kernels`
 src/amd_vi_regs.h        generated register subset (tools/gen_vi_regs.py)
