@@ -139,6 +139,36 @@ no Mac restart).**
 - Next: `dpm-enable` with amdgpu's features (less PCIe DPM and AVFS), with
   `status` before and after, then `vram-test`.
 
+**Fourth attempt (card power-cycled; the Mac stayed up).** Bring-up as
+before. `dpm-enable` with amdgpu's features less PCIe DPM and AVFS:
+`FEATURE_STATUS` `0x0000e003` after 0.29 s.
+
+| | before DPM | after DPM (and 3 s later) |
+|---|---|---|
+| SVI2 plane 1 (VDDC) | VID 104 = 900 mV | VID 128 = **750 mV** |
+| SVI2 plane 2 | VID 104 = 900 mV | VID 104 = 900 mV |
+| DPM indices | SCLK 0, MCLK 0, PCIe 0 | SCLK 0 -> 0, MCLK 0 -> 0, PCIe 0 -> 0 |
+| SMC clock report | 135 / 150 MHz (bogus) | 288-300 MHz engine, 400 MHz memory |
+
+`vram-test` (traced) failed the same way. BAR writes ran at 1.7 MB/s and the
+card died within 192 KB.
+
+- **So the engine clock was normal this time, and memory DPM was on.**
+- What all four attempts share: the SMC takes VDDC from the VBIOS boot
+  900 mV down to level 0's 750 mV. Then host writes into VRAM stall and the
+  device is lost, while register reads keep working until then.
+- amdgpu's `polaris10_populate_vr_config()` puts VDDC on SVI2 plane 1, so
+  plane 1 is the GPU core rail.
+- Level 0's 750 mV is a fixed entry in the VBIOS lookup table, not a leakage
+  ID (EVV resolves IDs 0xff02-0xff08 only).
+- **Hypothesis.** On Linux this part runs with AVFS on (closed-loop voltage,
+  calibrated by the BTC in `polaris10_start_smu()`), and rawgpu turned AVFS
+  off. With AVFS off, the SMC applies the table's 750 mV floor at idle, and
+  this chip's memory/host path may not hold at that voltage.
+  - Not tested yet. The next step is to run amdgpu's own `start_smu()` path,
+    including the AVFS BTC, instead of rawgpu's smc-load. That removes the
+    biggest remaining difference from Linux.
+
 ## 2026-11-04: stage 5 begins: host API, LDS, and what boot clocks give
 
 Same setup. `rawgpu bench-compute` (`src/amd_vi_bench.c`) runs entirely on
