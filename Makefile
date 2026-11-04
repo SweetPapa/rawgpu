@@ -1,7 +1,8 @@
 CC ?= clang
 CFLAGS ?= -O2 -g -std=gnu11 -Wall -Wextra -Wno-unused-parameter
-SRC := src/main.c src/transport_tinygpu.c src/pci.c src/family.c src/amd_vi.c src/amd_atom.c
-HDR := src/rg.h src/amd_ids.inc src/atom/rg_atom.h
+SRC := src/main.c src/transport_tinygpu.c src/pci.c src/family.c src/amd_atom.c src/amd_fw.c \
+       src/amd_vi.c src/amd_vi_gmc.c src/amd_vi_sdma.c
+HDR := src/rg.h src/amd_ids.inc src/atom/rg_atom.h src/amd_fw.h src/amd_vi.h src/amd_vi_regs.h src/amd_vi_regnames.inc
 
 # amdgpu's ATOM interpreter, compiled unmodified against the kernel shims.
 # -fno-strict-aliasing and -Wno-pointer-sign match how the kernel builds it.
@@ -26,10 +27,14 @@ build/rg_atom.o: src/atom/rg_atom.c src/atom/rg_atom.h src/atom/rg_atom_names.in
 ids:
 	python3 -I tools/gen_amd_ids.py $(AMDGPU_DRV) $(LINUX_SHA) > src/amd_ids.inc
 
+# Regenerate the VI register subset: make regs LINUX_AMD=/path/with/asic_reg/headers LINUX_SHA=<sha>
+regs:
+	python3 -I tools/gen_vi_regs.py $(LINUX_AMD) $(LINUX_SHA) src/amd_vi_regnames.inc > src/amd_vi_regs.h
+
 atom-names:
 	python3 -I tools/gen_atom_names.py src/atom/upstream/atombios.h > src/atom/rg_atom_names.inc
 
 clean:
 	rm -rf build
 
-.PHONY: ids atom-names clean
+.PHONY: ids regs atom-names clean

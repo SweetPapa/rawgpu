@@ -9,17 +9,25 @@ Apple-signed DriverKit extension that hands raw PCIe access (config space, BAR
 MMIO, DMA buffers) to userspace. On top of that, rawgpu is a small C codebase
 that identifies the card and, family by family, brings it up.
 
-**Status:** stage 2 of 5. The first card is a PowerColor RX 590 (Polaris 30).
-rawgpu posts it from userspace: Linux amdgpu's own ATOM interpreter, unmodified,
-runs the VBIOS `ASIC_Init`, which brings up the voltage regulators and trains the
-GDDR5. All 8 GB of VRAM then reads and writes correctly. Next is firmware, the
-DMA engine and a compute queue. See [docs/ROADMAP.md](docs/ROADMAP.md) and
-[docs/LOG.md](docs/LOG.md).
+**Status:** stage 3 of 5, in progress. The first card is a PowerColor RX 590
+(Polaris 30).
+
+- **Posting works.** rawgpu posts the card from userspace: Linux amdgpu's own
+  ATOM interpreter, unmodified, runs the VBIOS `ASIC_Init`. That brings up the
+  voltage regulators and trains the GDDR5, and all 8 GB of VRAM then reads and
+  writes correctly.
+- **GART and DMA-engine code is written.** The GART page tables check out.
+- **The engines need their microcode loaded by the SMC.** Polaris ignores
+  microcode written by the host, so porting amdgpu's SMC firmware loader
+  comes next.
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) and [docs/LOG.md](docs/LOG.md).
 
 ## Quick start
 
 ```sh
 tools/install-tinygpu.sh      # verified install; then approve it in System Settings
+tools/fetch-firmware.sh       # pinned, hash-checked AMD firmware into local/ (never committed)
 make
 ./build/rawgpu probe
 ./build/rawgpu post           # after each power-on of the card
@@ -40,9 +48,17 @@ Driver Extensions → TinyGPU. Check that it bound with
 | `rawgpu atom-info` | Lists the VBIOS command tables and boot clocks | VBIOS read only |
 | `rawgpu post [--trace F] [--trace-ops]` | Runs the VBIOS `ASIC_Init` | **Writes**: clocks, voltages, memory training |
 | `rawgpu vram-test [--enable-fb]` | Pattern test through BAR0 and the indirect window | **Writes** a few KB of VRAM |
+| `rawgpu status` | Engine, VM and SMC state | Reads only |
+| `rawgpu regs PATTERN...` | Reads registers by name, e.g. `'SDMA0_*'` | Reads only; skips data ports unless named exactly |
+| `rawgpu cfg [--clear-errors]` | Config space, plus PCI/PCIe/AER error status | Config reads (clearing writes the status bits) |
+| `rawgpu sdma-test [MB] ...` | GART + SDMA bring-up, copy tests with timing | **Writes**: VM setup, engine microcode, VRAM |
+| `rawgpu soft-reset` | amdgpu's SDMA/MC soft reset for blocks that report busy | **Writes**; see the recovery notes in the roadmap |
+| `rawgpu reset`, `rawgpu asic-reset` | PCIe reset / amdgpu's PCI-config reset | **Writes**; neither had any effect on this card |
 
-Nothing here resets the card, and nothing touches the VRAM window until the card
-is posted. `post` refuses to re-run on a posted card unless you pass `--force`.
+Nothing touches the VRAM window until the card is posted. `post` refuses to
+re-run on a posted card unless you pass `--force`. If the card stops answering
+(`no device answered config reads`), power-cycle the enclosure and run `post`
+again: nothing from macOS has been able to reset it.
 
 ## Swapping cards
 
@@ -68,7 +84,11 @@ in `src/family.c`.
 src/transport_tinygpu.c  raw PCIe over TinyGPU's socket server (one client at a time)
 src/pci.c                generic config-space decoding
 src/family.c             PCI ID -> family -> backend   (+ generated src/amd_ids.inc)
-src/amd_vi.c             AMD GCN3/4 backend: probe, VBIOS
+src/amd_vi.c             AMD GCN3/4 backend: register helpers, probe, VBIOS, post, commands
+src/amd_vi_gmc.c         GMC v8: VRAM placement and the VMID0 GART
+src/amd_vi_sdma.c        SDMA v3 rings, copies, fences; sdma-test
+src/amd_vi_regs.h        generated register subset (tools/gen_vi_regs.py)
+src/amd_fw.c             AMD firmware file loading and header checks
 src/amd_atom.c           ATOM BIOS header parsing
 src/atom/upstream/       Linux amdgpu's ATOM interpreter, byte for byte (see src/atom/UPSTREAM.md)
 src/atom/shim/           kernel-API shims so upstream compiles unmodified

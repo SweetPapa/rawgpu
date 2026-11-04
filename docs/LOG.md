@@ -2,6 +2,74 @@
 
 Dated, factual notes from real hardware. Newest first.
 
+## 2026-11-04: stage 3, first SDMA attempts (not working yet)
+
+**Firmware.** `tools/fetch-firmware.sh` pulls linux-firmware
+`703a4d95f86606b14b8433e7197663874ef89eed`; every file matches its pinned
+sha256. `polaris10_sdma.bin` is v58 (feature 31), 3109 dwords.
+
+**State before any writes** (`rawgpu status`):
+
+- **SMC:** on its boot ROM (PC `0x2c8c`, no driver firmware).
+  `SMU_FIRMWARE` = `0x00030006`, i.e. protected mode with `SMU_SEL` = 1.
+- **SDMA0 and SDMA1:** halted and idle.
+- **GART:** off.
+- **RLC:** off. **MEC:** halted.
+- **DMA buffers:** a 64 MB buffer maps as one segment at bus `0x80000000`.
+
+**Runs 1–2: `sdma-test`, ring in host memory.** The engine never fetched a
+packet. Afterwards:
+
+- PCI status showed *received target abort*.
+- PCIe device status showed *transactions pending*.
+- `SRBM_STATUS` had `MCB_BUSY` stuck, and SDMA0 stayed busy.
+
+Cause: `sdma-test` never mapped BAR0. The TinyGPU server silently drops MMIO
+writes to an unmapped BAR (writes get no response), so the GART table was
+never written. The GPU translated through stale VRAM.
+
+Fix: the backend maps BAR0 on open, and the transport now refuses MMIO to an
+unmapped or out-of-range BAR.
+
+**Runs 4–5: ring in VRAM, nothing touching host memory.**
+
+- PTE 0 reads back `0x0000000080000077` (bus `0x80000000`, valid, system,
+  snooped, R/W/X).
+- The ring in VRAM holds the right packet: `00000002 02010020 000000f4
+  00000001 deadbeef`, followed by NOPs. BAR0 and `MM_INDEX` read back the same.
+- Neither SDMA0 nor SDMA1 advanced its read pointer.
+- SDMA0 took a VMID0 range fault reading MC address 0 (client `0x53444d30`,
+  "SDM0").
+
+**Microcode readback.** I halted each engine, set `SDMA0_UCODE_ADDR` = 0 and
+read `SDMA0_UCODE_DATA` 16 times:
+
+```
+readback: ff77d9f9 bea5bef7 957bfb73 e969ef21 fb7afbab 7fa7fffe 5fec6b63 fbffdff5 ...
+file:     00000000 c819007c 00000000 1d940010 994008f4 00000000 840007ad 00000000 ...
+```
+
+- The values are identical across runs, and different per engine. That is
+  uninitialised SRAM.
+- The host's microcode writes never landed: **Polaris ignores
+  `SDMA*_UCODE_DATA` writes from the host**. The engines were running
+  garbage. Firmware has to go through the SMC (`PPSMC_MSG_LoadUcodes`).
+
+**Resets tried:**
+
+- `rawgpu reset` (TinyGPU: FLR, else hot reset): reported success, changed
+  nothing.
+- `rawgpu asic-reset` (amdgpu's PCI-config reset, `0x39d5e86b` to config
+  `0x7c`): no effect.
+- `rawgpu soft-reset`:
+  - It soft-reset SDMA, then the MC (SRBM bit `0x800`), and `MCB_BUSY`
+    cleared.
+  - PCIe *transactions pending* stayed set.
+  - The next `vram-test` failed its `MM_INDEX` checks.
+  - After that the card answered config reads with all-ones, and TinyGPU's
+    reset did not bring it back.
+  - **Needs a power cycle.**
+
 ## 2026-11-04: stage 2, card posted from userspace
 
 Same host, enclosure and card as stage 1. The card was cold and had never been

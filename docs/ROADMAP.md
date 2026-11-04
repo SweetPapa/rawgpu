@@ -37,23 +37,57 @@ What we learned:
   card, so this is expected but not yet tested. Run `rawgpu post` after every
   power-on; it is a no-op on an already-posted card.
 
-## Stage 3: firmware, memory, queues
+## Stage 3: firmware, memory, queues (in progress)
 
 The reference is Linux amdgpu `vi.c`, `gmc_v8_0.c`, `gfx_v8_0.c` and
-`sdma_v3_0.c`, plus `pm/powerplay/smumgr/polaris10_smumgr.c`.
+`sdma_v3_0.c`, plus `pm/powerplay/smumgr/{smu7,polaris10}_smumgr.c`.
 
-- **SMC firmware.** Polaris 30 (the RX 590) uses `polaris10_k2_smc.bin`: the
-  "kicker" variant, chosen by device ID and revision in `amdgpu_cgs.c`. The
-  blobs come from `linux-firmware`. Do not commit them here.
-- **GMC v8.** Set up a VM page table so the GPU can reach DMA buffers. Bus
-  addresses come from `rg_dma.seg[]`, 40-bit, 16 KB-page DART underneath.
-- **GFX microcode:** RLC, MEC, then one compute queue (an HQD programmed from
-  an MQD).
-- **SDMA engine.** Gives real DMA bandwidth numbers, which settles the
-  "behind the CalDigit dock" question.
-- No interrupts: TinyGPU exposes no MSI path. Poll fences in DMA memory.
+Done:
+
+- `tools/fetch-firmware.sh` fetches pinned, hash-checked blobs from
+  `linux-firmware` into `local/`. They are never committed.
+- `tools/gen_vi_regs.py` generates `src/amd_vi_regs.h`: the registers and
+  fields rawgpu uses, copied by script from amdgpu's headers.
+- **GMC v8 GART** (`src/amd_vi_gmc.c`), as `gmc_v8_0_mc_program()` and
+  `gart_enable()` do it. It has a 256 MB VMID0 GART at MC `0xff00000000`, with
+  the page table in VRAM. PTEs carry TinyGPU's bus addresses; PTE readback is
+  verified.
+- **SDMA v3 ring code** (`src/amd_vi_sdma.c`), as `sdma_v3_0_gfx_resume()`
+  does it. The ring and fences can live in VRAM or host memory.
+  `rawgpu sdma-test` runs gated phases: engine, VRAM copy, host write, host
+  read, then round trip and bandwidth.
+- Diagnostics: `status`, `regs PATTERN`, `cfg` (PCI/PCIe/AER errors),
+  `soft-reset`.
+
+What we learned (see `docs/LOG.md`, 2026-11-04):
+
+- **Polaris will not take engine microcode from the host.** After a direct
+  load, the SDMA microcode RAM still holds its power-on contents. Writes to
+  `SDMA0_UCODE_DATA` are ignored, as the same readback shows on both engines.
+  amdgpu dropped direct loading for VI for this reason. The SMC loads the
+  SDMA, RLC and MEC images.
+
+Next:
+
+- **SMC firmware.** Polaris 30 uses `polaris10_k2_smc.bin`. The SMU here runs
+  in protected mode (`SMU_FIRMWARE`: `SMU_MODE` = 1, `SMU_SEL` = 1), so port
+  `polaris10_start_smu_in_protection_mode()`.
+- **SMU-loaded microcode.** `smu7_request_smu_load_fw()`: a TOC in VRAM lists
+  each image's MC address, then `PPSMC_MSG_LoadUcodes` and a poll of
+  `UcodeLoadStatus`. Images sit in VRAM, so loading needs no host reads.
+- Rerun `sdma-test`. Check that the microcode RAM reads back as the image.
+- **GFX:** RLC, MEC, then one compute queue (an HQD programmed from an MQD).
+- No interrupts: TinyGPU exposes no MSI path. Poll fences.
 - **Check:** SDMA copies a buffer host → VRAM → host intact. Bandwidth is
   logged in `docs/LOG.md`.
+
+Recovery notes:
+
+- A wedged card cannot be reset from macOS. TinyGPU's reset (FLR, then hot
+  reset) returns success and changes nothing. amdgpu's PCI-config reset
+  (write `0x39d5e86b` to config `0x7c`) also has no effect through DriverKit.
+- A GMC soft reset cleared a stuck MC busy bit. Shortly afterwards the card
+  stopped answering config reads, and only a power cycle recovers that.
 
 ## Stage 4: first dispatch
 

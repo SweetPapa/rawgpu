@@ -2,6 +2,8 @@
 #include "rg.h"
 
 #include <errno.h>
+#include <stdio.h>
+#include <string.h>
 
 int rg_pci_identify(rg_dev *d) {
   uint32_t id, cls, ss;
@@ -95,4 +97,69 @@ const char *rg_pci_vendor_name(uint16_t v) {
   case 0x106B: return "Apple";
   default: return "unknown vendor";
   }
+}
+
+int rg_pci_find_ext_cap(rg_dev *d, uint16_t want) {
+  uint32_t off = 0x100;
+  for (int guard = 0; off >= 0x100 && off < 0x1000 && guard < 64; guard++) {
+    uint32_t hdr;
+    if (rg_cfg_read(d, off, 4, &hdr) || hdr == 0 || hdr == 0xFFFFFFFFu) return 0;
+    if ((hdr & 0xFFFF) == want) return (int)off;
+    off = hdr >> 20;
+  }
+  return 0;
+}
+
+/* PCI status, PCIe device status and AER: what went wrong on the link, if anything. */
+int rg_pci_errors(rg_dev *d, rg_pci_err *e) {
+  memset(e, 0, sizeof *e);
+  int r = rg_cfg_read(d, 0x06, 2, &e->status);
+  int cap = rg_pci_find_cap(d, RG_PCI_CAP_EXP);
+  if (!r && cap) r = rg_cfg_read(d, (uint32_t)cap + 0x0A, 2, &e->devsta);
+  int aer = rg_pci_find_ext_cap(d, 0x0001);
+  e->has_aer = aer != 0;
+  if (!r && aer) {
+    r = rg_cfg_read(d, (uint32_t)aer + 0x04, 4, &e->uncor);
+    if (!r) r = rg_cfg_read(d, (uint32_t)aer + 0x10, 4, &e->cor);
+    for (int i = 0; !r && i < 4; i++) r = rg_cfg_read(d, (uint32_t)aer + 0x1C + 4u * (uint32_t)i, 4, &e->hdr_log[i]);
+  }
+  return r;
+}
+
+/* Write-1-to-clear everything rg_pci_errors() reports. */
+int rg_pci_clear_errors(rg_dev *d) {
+  rg_pci_err e;
+  int r = rg_pci_errors(d, &e);
+  if (r) return r;
+  r = rg_cfg_write(d, 0x06, 2, e.status & 0xF900);
+  int cap = rg_pci_find_cap(d, RG_PCI_CAP_EXP);
+  if (!r && cap) r = rg_cfg_write(d, (uint32_t)cap + 0x0A, 2, e.devsta & 0x000F);
+  int aer = rg_pci_find_ext_cap(d, 0x0001);
+  if (!r && aer) r = rg_cfg_write(d, (uint32_t)aer + 0x04, 4, e.uncor);
+  if (!r && aer) r = rg_cfg_write(d, (uint32_t)aer + 0x10, 4, e.cor);
+  return r;
+}
+
+void rg_pci_print_errors(const rg_pci_err *e) {
+  static const struct { uint32_t bit; const char *name; } st[] = {
+    {1u << 15, "detected parity error"}, {1u << 14, "signaled system error"}, {1u << 13, "received master abort"},
+    {1u << 12, "received target abort"}, {1u << 11, "signaled target abort"}, {1u << 8, "master data parity error"}};
+  static const struct { uint32_t bit; const char *name; } un[] = {
+    {1u << 4, "data link protocol"}, {1u << 5, "surprise down"}, {1u << 12, "poisoned TLP"},
+    {1u << 13, "flow control protocol"}, {1u << 14, "completion timeout"}, {1u << 15, "completer abort"},
+    {1u << 16, "unexpected completion"}, {1u << 17, "receiver overflow"}, {1u << 18, "malformed TLP"},
+    {1u << 19, "ECRC"}, {1u << 20, "unsupported request"}, {1u << 21, "ACS violation"}};
+  printf("PCI status 0x%04x:", e->status);
+  int any = 0;
+  for (size_t i = 0; i < sizeof st / sizeof st[0]; i++) if (e->status & st[i].bit) { printf(" [%s]", st[i].name); any = 1; }
+  printf("%s\n", any ? "" : " no errors");
+  printf("PCIe device status 0x%04x:%s%s%s%s%s\n", e->devsta, e->devsta & 1 ? " [correctable]" : "",
+         e->devsta & 2 ? " [non-fatal]" : "", e->devsta & 4 ? " [fatal]" : "", e->devsta & 8 ? " [unsupported request]" : "",
+         e->devsta & 0xF ? "" : " no errors");
+  if (!e->has_aer) { printf("AER: not present\n"); return; }
+  printf("AER uncorrectable 0x%08x:", e->uncor);
+  for (size_t i = 0; i < sizeof un / sizeof un[0]; i++) if (e->uncor & un[i].bit) printf(" [%s]", un[i].name);
+  printf("%s\nAER correctable 0x%08x\n", e->uncor ? "" : " none", e->cor);
+  if (e->uncor)
+    printf("AER header log: %08x %08x %08x %08x\n", e->hdr_log[0], e->hdr_log[1], e->hdr_log[2], e->hdr_log[3]);
 }

@@ -14,18 +14,22 @@
 #include <stdint.h>
 
 #define RG_MAX_BARS 6
-#define RG_MAX_DMA_SEGS 32
 
 typedef struct rg_dev rg_dev;
 
-/* CPU memory the GPU can reach at the listed bus (IOVA) addresses. */
+/* CPU memory the GPU can reach at the listed bus (IOVA) addresses. The
+ * segments cover the buffer in order; together their lengths equal `size`. */
+typedef struct { uint64_t addr, len; } rg_dma_seg;
 typedef struct {
   void *cpu;
   size_t size;
   int nseg;
-  struct { uint64_t addr, len; } seg[RG_MAX_DMA_SEGS];
+  rg_dma_seg *seg; /* malloc'd; freed by dma_free */
   int fd;
 } rg_dma;
+
+/* Bus address of byte `off` of the buffer, or 0 if off is out of range. */
+uint64_t rg_dma_bus(const rg_dma *b, uint64_t off);
 
 typedef struct {
   const char *name;
@@ -36,6 +40,7 @@ typedef struct {
   int (*mmio_write)(rg_dev *, int bar, uint64_t off, const void *buf, size_t len);
   int (*dma_alloc)(rg_dev *, size_t size, rg_dma *out);
   void (*dma_free)(rg_dev *, rg_dma *);
+  int (*reset)(rg_dev *);  /* PCIe function-level reset, or hot reset if FLR is unsupported */
   void (*close)(rg_dev *);
 } rg_transport_ops;
 
@@ -71,6 +76,16 @@ int rg_pci_identify(rg_dev *d);
 int rg_pci_find_cap(rg_dev *d, uint8_t id); /* config offset, or 0 if absent */
 int rg_pci_link(rg_dev *d, int *cur_gen, int *cur_width, int *max_gen, int *max_width);
 int rg_pci_bars(rg_dev *d, rg_bar_desc bars[RG_MAX_BARS]);
+int rg_pci_find_ext_cap(rg_dev *d, uint16_t id); /* extended config offset, or 0 */
+
+typedef struct {
+  uint32_t status, devsta;           /* PCI status (0x06), PCIe device status */
+  bool has_aer;
+  uint32_t uncor, cor, hdr_log[4];   /* AER uncorrectable/correctable status, header of the first error */
+} rg_pci_err;
+int rg_pci_errors(rg_dev *d, rg_pci_err *e);
+int rg_pci_clear_errors(rg_dev *d);
+void rg_pci_print_errors(const rg_pci_err *e);
 const char *rg_pci_class_name(uint32_t class_code);
 const char *rg_pci_vendor_name(uint16_t vendor);
 
@@ -96,12 +111,6 @@ typedef struct { uint16_t device; const char *chip; uint32_t flags; } rg_amd_id;
 typedef struct rg_backend rg_backend;
 
 typedef struct {
-  const char *trace_path; /* register trace file, or NULL */
-  bool trace_ops;         /* include opcode-level ATOM debug output in the trace */
-  bool force;             /* post even if the card already reports posted */
-} rg_post_opts;
-
-typedef struct {
   rg_gen gen;
   const char *chip;        /* e.g. "POLARIS10", or NULL */
   const char *gen_name;    /* e.g. "AMD GCN3/4 (VI)" */
@@ -110,15 +119,22 @@ typedef struct {
   const char *support;     /* one line: who can drive this card today */
 } rg_ident;
 
+/* A backend's own subcommand. `run` gets the arguments after the command name
+ * and returns 0 or a negative errno; -EINVAL prints the usage line. */
+typedef struct {
+  const char *name;
+  const char *args; /* argument synopsis, or "" */
+  const char *help; /* one line; starts with "WRITES" if it changes hardware state */
+  int (*run)(rg_dev *, const rg_ident *, int argc, char **argv);
+} rg_cmd;
+
 struct rg_backend {
   const char *name;
   int reg_bar;                      /* BAR holding the register aperture */
-  uint32_t safe_reg;                /* a side-effect-free register for latency tests */
+  uint32_t safe_reg;                /* byte offset of a side-effect-free register for latency tests */
   int (*probe)(rg_dev *, const rg_ident *);  /* read-only status report to stdout */
   int (*vbios_read)(rg_dev *, uint8_t **buf, size_t *len); /* caller frees *buf */
-  int (*atom_info)(rg_dev *);                     /* parse the VBIOS tables; no hardware writes */
-  int (*post)(rg_dev *, const rg_post_opts *);    /* run the VBIOS init: writes registers */
-  int (*vram_test)(rg_dev *, bool enable_fb);     /* pattern test through the VRAM BAR */
+  const rg_cmd *cmds;               /* terminated by an entry with name NULL */
 };
 
 void rg_identify_family(const rg_dev *d, rg_ident *out);

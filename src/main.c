@@ -11,15 +11,27 @@ static const char *usage =
   "usage: rawgpu [--sock PATH] <command>\n"
   "\n"
   "  probe            identify the card, link and BARs, then run its family's probe (default)\n"
-  "  cfg              hex-dump PCI config space\n"
+  "  cfg [--clear-errors]\n"
+  "                   hex-dump PCI config space and decode PCI/PCIe/AER error status\n"
   "  vbios -o FILE    save the VBIOS image (writes the ROM index register, as amdgpu does)\n"
   "  bench [N]        round-trip latency of config and register reads\n"
   "  dma-test [KB]    allocate a DMA buffer and print its bus addresses (no GPU activity)\n"
-  "  atom-info        list the VBIOS command tables and ASIC_Init parameters (no writes)\n"
-  "  post [--trace FILE] [--trace-ops] [--force]\n"
-  "                   WRITES: run the VBIOS ASIC_Init so the card's memory works\n"
-  "  vram-test [--enable-fb]\n"
-  "                   WRITES VRAM: pattern test through BAR0 (needs a posted card)\n";
+  "  reset            WRITES: PCIe reset through TinyGPU (FLR, else hot reset); a no-op on the RX 590\n";
+
+static void print_backend_usage(FILE *f, const rg_backend *b) {
+  fprintf(f, "\n%s commands:\n", b->name);
+  for (const rg_cmd *c = b->cmds; c && c->name; c++) {
+    char head[128];
+    snprintf(head, sizeof head, "%s%s%s", c->name, c->args[0] ? " " : "", c->args);
+    if (strlen(head) <= 16) fprintf(f, "  %-16s %s\n", head, c->help);
+    else fprintf(f, "  %s\n  %-16s %s\n", head, "", c->help);
+  }
+}
+
+static void print_usage(FILE *f) {
+  fputs(usage, f);
+  print_backend_usage(f, &rg_backend_amd_vi);
+}
 
 static double now_us(void) {
   struct timespec t;
@@ -60,7 +72,7 @@ static int cmd_probe(rg_dev *d, const rg_ident *id) {
   return id->backend->probe(d, id);
 }
 
-static int cmd_cfg(rg_dev *d) {
+static int cmd_cfg(rg_dev *d, bool clear) {
   for (uint32_t off = 0; off < 0x100; off += 16) {
     printf("%03x:", off);
     for (uint32_t i = 0; i < 16; i += 4) {
@@ -69,6 +81,14 @@ static int cmd_cfg(rg_dev *d) {
       printf(" %02x %02x %02x %02x", v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, v >> 24);
     }
     printf("\n");
+  }
+  rg_pci_err e;
+  if (rg_pci_errors(d, &e)) return -EIO;
+  rg_pci_print_errors(&e);
+  if (clear) {
+    if (rg_pci_clear_errors(d) || rg_pci_errors(d, &e)) return -EIO;
+    printf("after clearing:\n");
+    rg_pci_print_errors(&e);
   }
   return 0;
 }
@@ -123,40 +143,49 @@ int main(int argc, char **argv) {
   int i = 1;
   if (i + 1 < argc && !strcmp(argv[i], "--sock")) { sock = argv[i + 1]; i += 2; }
   const char *cmd = i < argc ? argv[i++] : "probe";
-  if (!strcmp(cmd, "-h") || !strcmp(cmd, "--help") || !strcmp(cmd, "help")) { fputs(usage, stdout); return 0; }
+  if (!strcmp(cmd, "-h") || !strcmp(cmd, "--help") || !strcmp(cmd, "help")) { print_usage(stdout); return 0; }
 
   rg_dev d;
   int r = rg_open_tinygpu(&d, sock);
   if (r) return 1;
+  if (!strcmp(cmd, "reset")) { /* must work on a card that no longer answers config reads */
+    r = d.ops->reset(&d);
+    uint32_t id0 = 0;
+    int rr = rg_cfg_read(&d, 0, 4, &id0);
+    printf("reset %s; config space now reads %08x%s\n", r ? "FAILED" : "done", id0, rr ? " (read failed)" : "");
+    rg_close(&d);
+    return r || rr || id0 == 0xFFFFFFFFu ? 1 : 0;
+  }
   if ((r = rg_pci_identify(&d))) { fprintf(stderr, "rawgpu: no device answered config reads (%d)\n", r); rg_close(&d); return 1; }
   rg_ident id;
   rg_identify_family(&d, &id);
 
   if (!strcmp(cmd, "probe")) r = cmd_probe(&d, &id);
-  else if (!strcmp(cmd, "cfg")) r = cmd_cfg(&d);
+  else if (!strcmp(cmd, "cfg")) r = cmd_cfg(&d, i < argc && !strcmp(argv[i], "--clear-errors"));
   else if (!strcmp(cmd, "vbios")) {
     if (i + 1 < argc && !strcmp(argv[i], "-o")) r = cmd_vbios(&d, &id, argv[i + 1]);
-    else { fputs(usage, stderr); r = -EINVAL; }
+    else { print_usage(stderr); r = -EINVAL; }
   } else if (!strcmp(cmd, "bench")) r = cmd_bench(&d, &id, i < argc ? atoi(argv[i]) : 2000);
   else if (!strcmp(cmd, "dma-test")) r = cmd_dma_test(&d, i < argc ? (size_t)atoi(argv[i]) : 1024);
-  else if (!strcmp(cmd, "atom-info") || !strcmp(cmd, "post") || !strcmp(cmd, "vram-test")) {
-    const rg_backend *b = id.backend;
-    if (!b || !b->atom_info) { fprintf(stderr, "rawgpu: no ATOM support for this family\n"); r = -ENOTSUP; }
-    else if (!strcmp(cmd, "atom-info")) r = b->atom_info(&d);
-    else if (!strcmp(cmd, "post")) {
-      rg_post_opts o = {0};
-      for (; i < argc; i++) {
-        if (!strcmp(argv[i], "--trace") && i + 1 < argc) o.trace_path = argv[++i];
-        else if (!strcmp(argv[i], "--trace-ops")) o.trace_ops = true;
-        else if (!strcmp(argv[i], "--force")) o.force = true;
-        else { fputs(usage, stderr); r = -EINVAL; break; }
-      }
-      if (!r) r = b->post(&d, &o);
+  else if (!strcmp(cmd, "reset")) {
+    r = d.ops->reset(&d);
+    uint32_t id0 = 0;
+    if (!r) r = rg_cfg_read(&d, 0, 4, &id0);
+    printf("reset %s; config space now reads %04x:%04x\n", r ? "FAILED" : "done", id0 & 0xFFFF, id0 >> 16);
+  }
+  else {
+    const rg_cmd *c = NULL;
+    for (const rg_cmd *k = id.backend ? id.backend->cmds : NULL; k && k->name && !c; k++)
+      if (!strcmp(k->name, cmd)) c = k;
+    if (!c) {
+      fprintf(stderr, "rawgpu: unknown command '%s'%s\n", cmd, id.backend ? "" : " (and this card has no backend)");
+      print_usage(stderr);
+      r = -EINVAL;
     } else {
-      bool en = i < argc && !strcmp(argv[i], "--enable-fb");
-      r = b->vram_test(&d, en);
+      r = c->run(&d, &id, argc - i, argv + i);
+      if (r == -EINVAL) fprintf(stderr, "usage: rawgpu %s %s\n", c->name, c->args);
     }
-  } else { fputs(usage, stderr); r = -EINVAL; }
+  }
 
   rg_close(&d);
   return r ? 1 : 0;

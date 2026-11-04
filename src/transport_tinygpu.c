@@ -112,9 +112,20 @@ static int tg_bar_map(rg_dev *d, int bar, uint64_t *size) {
   return r;
 }
 
+/* The server silently drops writes to a BAR that is not mapped or out of range
+ * (writes get no response), so check here and fail loudly instead. */
+static int check_bar(rg_dev *d, int bar, uint64_t off, size_t len, const char *what) {
+  if (bar < 0 || bar >= RG_MAX_BARS || !d->bar_size[bar] || off + len > d->bar_size[bar] || len > TG_BULK_MAX) {
+    fprintf(stderr, "rawgpu: MMIO %s of %zu bytes at BAR%d+0x%llx: BAR %s\n", what, len, bar, (unsigned long long)off,
+            bar >= 0 && bar < RG_MAX_BARS && d->bar_size[bar] ? "too small" : "not mapped (call rg_bar_map first)");
+    return -EINVAL;
+  }
+  return 0;
+}
+
 static int tg_mmio_read(rg_dev *d, int bar, uint64_t off, void *buf, size_t len) {
   tg_priv *p = d->priv;
-  if (len > TG_BULK_MAX) return -EINVAL;
+  if (check_bar(d, bar, off, len, "read")) return -EINVAL;
   tg_req rq = {.cmd = TG_MMIO_READ, .bar = (uint32_t)bar, .arg0 = off, .arg1 = len};
   tg_resp rs;
   if (send_all(p->fd, &rq, sizeof rq) || recv_all(p->fd, &rs, sizeof rs)) return -EIO;
@@ -126,7 +137,7 @@ static int tg_mmio_read(rg_dev *d, int bar, uint64_t off, void *buf, size_t len)
  * is preserved because the server handles requests strictly in order. */
 static int tg_mmio_write(rg_dev *d, int bar, uint64_t off, const void *buf, size_t len) {
   tg_priv *p = d->priv;
-  if (len > TG_BULK_MAX) return -EINVAL;
+  if (check_bar(d, bar, off, len, "write")) return -EINVAL;
   tg_req rq = {.cmd = TG_MMIO_WRITE, .bar = (uint32_t)bar, .arg0 = off, .arg1 = len};
   if (send_all(p->fd, &rq, sizeof rq) || send_all(p->fd, buf, len)) return -EIO;
   return 0;
@@ -158,12 +169,21 @@ static int tg_dma_alloc(rg_dev *d, size_t size, rg_dma *out) {
 
   memset(out, 0, sizeof *out);
   out->cpu = cpu; out->size = rs.resp0; out->fd = fd;
+  /* The list ends at the first (0,0) pair, and the segments must cover the buffer. */
   const uint64_t *segs = cpu;
-  for (int i = 0; i < RG_MAX_DMA_SEGS && segs[2 * i + 1] != 0; i++) {
-    out->seg[i].addr = segs[2 * i];
-    out->seg[i].len = segs[2 * i + 1];
-    out->nseg = i + 1;
+  size_t max = out->size / 16, ns = 0;
+  uint64_t covered = 0;
+  while (ns < max && segs[2 * ns + 1] != 0) covered += segs[2 * ns++ + 1];
+  out->seg = malloc((ns ? ns : 1) * sizeof *out->seg);
+  if (!out->seg || covered < out->size) {
+    fprintf(stderr, "rawgpu: TinyGPU DMA segment list covers %llu of %zu bytes\n", (unsigned long long)covered,
+            out->size);
+    munmap(cpu, out->size); close(fd); free(out->seg);
+    memset(out, 0, sizeof *out); out->fd = -1;
+    return -EIO;
   }
+  for (size_t i = 0; i < ns; i++) { out->seg[i].addr = segs[2 * i]; out->seg[i].len = segs[2 * i + 1]; }
+  out->nseg = (int)ns;
   memset(cpu, 0, out->size); /* the segment list has been consumed */
   return 0;
 }
@@ -173,8 +193,16 @@ static void tg_dma_free(rg_dev *d, rg_dma *b) {
   (void)d;
   if (b->cpu) munmap(b->cpu, b->size);
   if (b->fd >= 0) close(b->fd);
+  free(b->seg);
   memset(b, 0, sizeof *b);
   b->fd = -1;
+}
+
+/* The extension tries a function-level reset and falls back to a hot reset of the link. */
+static int tg_reset(rg_dev *d) {
+  int r = tg_rpc(d, TG_RESET, 0, 0, 0, 0, NULL, "reset");
+  memset(d->bar_size, 0, sizeof d->bar_size); /* map BARs again afterwards */
+  return r;
 }
 
 static void tg_close(rg_dev *d) {
@@ -186,7 +214,7 @@ static void tg_close(rg_dev *d) {
 static const rg_transport_ops tg_ops = {
   .name = "tinygpu", .cfg_read = tg_cfg_read, .cfg_write = tg_cfg_write, .bar_map = tg_bar_map,
   .mmio_read = tg_mmio_read, .mmio_write = tg_mmio_write, .dma_alloc = tg_dma_alloc,
-  .dma_free = tg_dma_free, .close = tg_close,
+  .dma_free = tg_dma_free, .reset = tg_reset, .close = tg_close,
 };
 
 static int try_connect(const char *path) {
@@ -265,6 +293,14 @@ int rg_open_tinygpu(rg_dev *d, const char *sock_path) {
 
 void rg_close(rg_dev *d) {
   if (d->ops && d->ops->close) d->ops->close(d);
+}
+
+uint64_t rg_dma_bus(const rg_dma *b, uint64_t off) {
+  for (int i = 0; i < b->nseg; i++) {
+    if (off < b->seg[i].len) return b->seg[i].addr + off;
+    off -= b->seg[i].len;
+  }
+  return 0;
 }
 
 int rg_bar_map(rg_dev *d, int bar, uint64_t *size) {

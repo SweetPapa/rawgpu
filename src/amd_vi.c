@@ -1,82 +1,135 @@
 /* Backend: AMD GCN3/GCN4 "Volcanic Islands" dGPUs (Tonga, Fiji, Polaris 10/11/12, VegaM).
  *
- * Register offsets come from Linux amdgpu (drivers/gpu/drm/amd/include/asic_reg/,
- * MIT-licensed); the Linux headers give dword indices, so byte offset = index * 4.
- *
- * Everything here is read-only except the ROM read, which writes the SMC
- * index register exactly as amdgpu's vi_read_bios_from_rom() does before the
- * card is posted.
+ * Register offsets come from Linux amdgpu via tools/gen_vi_regs.py (src/amd_vi_regs.h);
+ * they are dword indices, as in the kernel. This file has the register helpers,
+ * probe, VBIOS, post and the VRAM test; amd_vi_gmc.c and amd_vi_sdma.c bring up
+ * the memory controller's GART and the DMA engines.
  */
-#include "rg.h"
+#include "amd_vi.h"
 #include "atom/rg_atom.h"
 
 #include <errno.h>
+#include <fnmatch.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
-#define VI_REG_BAR 5
-#define VI_VRAM_BAR 0
-
-/* bif_5_0_d.h */
-#define mmMM_INDEX         (0x0U * 4)
-#define mmMM_DATA          (0x1U * 4)
-#define mmCONFIG_MEMSIZE   (0x150aU * 4)
-#define mmBIF_FB_EN        (0x1524U * 4)
-#define mmBIOS_SCRATCH_0   (0x5c9U * 4)
-#define BIF_FB_EN__FB_READ_EN_MASK  0x1
-#define BIF_FB_EN__FB_WRITE_EN_MASK 0x2
-/* gmc_8_1_d.h */
-#define mmMC_SHARED_CHMAP          (0x801U * 4)
-#define mmMC_VM_FB_LOCATION        (0x809U * 4)
-#define mmMC_VM_FB_OFFSET          (0x81aU * 4)
-#define mmMC_ARB_RAMCFG            (0x9d8U * 4)
-#define mmMC_SEQ_SUP_CNTL          (0xa32U * 4)
-#define mmMC_SEQ_TRAIN_WAKEUP_CNTL (0xa3aU * 4)
-#define mmMC_SEQ_MISC0             (0xa80U * 4)
-/* oss_3_0_d.h */
-#define mmHDP_NONSURFACE_BASE      (0xb01U * 4)
-#define mmHDP_NONSURFACE_INFO      (0xb02U * 4)
-#define mmHDP_NONSURFACE_SIZE      (0xb03U * 4)
 /* atombios.h: what amdgpu_atombios_scratch_regs_init() adjusts before posting */
 #define ATOM_S2_DEVICE_DPMS_STATE        0x00010000u
 #define ATOM_S2_VRI_BRIGHT_ENABLE        0x20000000u
 #define ATOM_S6_ACC_BLOCK_DISPLAY_SWITCH 0x20000000u
-/* smu_7_1_1_d.h / smu_7_1_3_d.h (same values on Polaris) */
-#define mmSMC_IND_INDEX_11 (0x1ACU * 4)
-#define mmSMC_IND_DATA_11  (0x1ADU * 4)
-#define ixROM_INDEX        0xc0600010U
-#define ixROM_DATA         0xc0600014U
+#define ATOM_S3_ASIC_GUI_ENGINE_HUNG     0x20000000u
+#define AMDGPU_ASIC_RESET_DATA           0x39d5e86bu /* amdgpu.h */
 
 #define VI_ROM_MAX (256u << 10)
 
-static void vi_report_mc(rg_dev *d);
+/* ---- register helpers ---- */
 
-static int map_regs(rg_dev *d) {
+uint32_t vi_rreg(vi_dev *v, uint32_t idx) {
+  uint32_t val = 0xFFFFFFFFu;
+  if (v->err) return val;
+  int r = rg_rreg32(v->d, VI_REG_BAR, idx * 4, &val);
+  if (r) { v->err = r; return 0xFFFFFFFFu; }
+  if (v->trace) fprintf(v->trace, "R %05x %08x\n", idx, val);
+  return val;
+}
+
+void vi_wreg(vi_dev *v, uint32_t idx, uint32_t val) {
+  if (v->err) return;
+  int r = rg_wreg32(v->d, VI_REG_BAR, idx * 4, val);
+  if (r) v->err = r;
+  if (v->trace) fprintf(v->trace, "W %05x %08x\n", idx, val);
+}
+
+uint32_t vi_rsmc(vi_dev *v, uint32_t addr) {
+  vi_wreg(v, mmSMC_IND_INDEX_11, addr);
+  return vi_rreg(v, mmSMC_IND_DATA_11);
+}
+
+void vi_wsmc(vi_dev *v, uint32_t addr, uint32_t val) {
+  vi_wreg(v, mmSMC_IND_INDEX_11, addr);
+  vi_wreg(v, mmSMC_IND_DATA_11, val);
+}
+
+double vi_now(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (double)t.tv_sec + t.tv_nsec / 1e9;
+}
+
+void vi_udelay(unsigned us) {
+  struct timespec ts = {us / 1000000u, (long)(us % 1000000u) * 1000};
+  nanosleep(&ts, NULL);
+}
+
+/* Each read is a socket round trip (~10 us), so this polls about that often
+ * without sleeping. */
+int vi_wait(vi_dev *v, uint32_t idx, uint32_t mask, uint32_t want, unsigned timeout_us) {
+  double end = vi_now() + timeout_us / 1e6;
+  do {
+    uint32_t x = vi_rreg(v, idx);
+    if (v->err) return v->err;
+    if ((x & mask) == want) return 0;
+  } while (vi_now() < end);
+  return -ETIMEDOUT;
+}
+
+void vi_program_sequence(vi_dev *v, const uint32_t *seq, size_t n) {
+  for (size_t i = 0; i + 2 < n; i += 3) {
+    uint32_t reg = seq[i], and_mask = seq[i + 1], or_mask = seq[i + 2], tmp;
+    if (and_mask == 0xFFFFFFFFu) tmp = or_mask;
+    else tmp = (vi_rreg(v, reg) & ~and_mask) | or_mask; /* pre-AI semantics */
+    vi_wreg(v, reg, tmp);
+  }
+}
+
+void vi_srbm_select(vi_dev *v, uint32_t me, uint32_t pipe, uint32_t queue, uint32_t vmid) {
+  uint32_t x = 0;
+  x = REG_SET_FIELD(x, SRBM_GFX_CNTL, PIPEID, pipe);
+  x = REG_SET_FIELD(x, SRBM_GFX_CNTL, MEID, me);
+  x = REG_SET_FIELD(x, SRBM_GFX_CNTL, VMID, vmid);
+  x = REG_SET_FIELD(x, SRBM_GFX_CNTL, QUEUEID, queue);
+  vi_wreg(v, mmSRBM_GFX_CNTL, x);
+}
+
+int vi_open(vi_dev *v, rg_dev *d) {
+  memset(v, 0, sizeof *v);
+  v->d = d;
   uint64_t sz = 0;
   int r = rg_bar_map(d, VI_REG_BAR, &sz);
   if (r) { fprintf(stderr, "rawgpu: could not map register BAR%d\n", VI_REG_BAR); return r; }
-  if (sz < mmCONFIG_MEMSIZE + 4) { fprintf(stderr, "rawgpu: register BAR too small (%llu)\n", (unsigned long long)sz); return -EINVAL; }
+  if (sz < 256u << 10) { fprintf(stderr, "rawgpu: register BAR too small (%llu)\n", (unsigned long long)sz); return -EINVAL; }
+  /* The VRAM window. Everything rawgpu keeps in VRAM sits inside it (see VI_VRAM_*). */
+  if ((r = rg_bar_map(d, VI_VRAM_BAR, &sz))) { fprintf(stderr, "rawgpu: could not map VRAM BAR%d\n", VI_VRAM_BAR); return r; }
+  if (sz < (128ull << 20) + (4u << 20)) { fprintf(stderr, "rawgpu: VRAM BAR is only %llu MB\n", (unsigned long long)(sz >> 20)); return -EINVAL; }
   return 0;
 }
 
-/* Streams `n` dwords of the VBIOS starting at byte 0 through the auto-incrementing ROM_DATA port. */
-static int rom_read(rg_dev *d, uint32_t *dst, size_t n) {
-  int r;
-  if ((r = rg_wreg32(d, VI_REG_BAR, mmSMC_IND_INDEX_11, ixROM_INDEX))) return r;
-  if ((r = rg_wreg32(d, VI_REG_BAR, mmSMC_IND_DATA_11, 0))) return r;
-  if ((r = rg_wreg32(d, VI_REG_BAR, mmSMC_IND_INDEX_11, ixROM_DATA))) return r;
-  for (size_t i = 0; i < n; i++)
-    if ((r = rg_rreg32(d, VI_REG_BAR, mmSMC_IND_DATA_11, &dst[i]))) return r;
-  return 0;
+bool vi_posted(vi_dev *v, uint32_t *memsize_mb) {
+  uint32_t m = vi_rreg(v, mmCONFIG_MEMSIZE);
+  if (memsize_mb) *memsize_mb = m;
+  return !v->err && m != 0 && m != 0xFFFFFFFFu; /* amdgpu_device_need_post() */
+}
+
+/* ---- VBIOS ---- */
+
+/* Streams `n` dwords of the VBIOS starting at byte 0 through the auto-incrementing ROM_DATA port,
+ * as vi_read_bios_from_rom() does. */
+static int rom_read(vi_dev *v, uint32_t *dst, size_t n) {
+  vi_wreg(v, mmSMC_IND_INDEX_11, ixROM_INDEX);
+  vi_wreg(v, mmSMC_IND_DATA_11, 0);
+  vi_wreg(v, mmSMC_IND_INDEX_11, ixROM_DATA);
+  for (size_t i = 0; i < n && !v->err; i++) dst[i] = vi_rreg(v, mmSMC_IND_DATA_11);
+  return v->err;
 }
 
 static int vi_vbios_read(rg_dev *d, uint8_t **out, size_t *len) {
-  int r = map_regs(d);
+  vi_dev v;
+  int r = vi_open(&v, d);
   if (r) return r;
   uint32_t hdr[128];
-  if ((r = rom_read(d, hdr, 128))) return r;
+  if ((r = rom_read(&v, hdr, 128))) return r;
   const uint8_t *h = (const uint8_t *)hdr;
   if (h[0] != 0x55 || h[1] != 0xAA) {
     fprintf(stderr, "rawgpu: no option-ROM signature (got %02x %02x)\n", h[0], h[1]);
@@ -86,31 +139,57 @@ static int vi_vbios_read(rg_dev *d, uint8_t **out, size_t *len) {
   if (size == 0 || size > VI_ROM_MAX) size = 64u << 10;
   uint8_t *buf = malloc(size);
   if (!buf) return -ENOMEM;
-  if ((r = rom_read(d, (uint32_t *)buf, size / 4))) { free(buf); return r; }
+  if ((r = rom_read(&v, (uint32_t *)buf, size / 4))) { free(buf); return r; }
   *out = buf;
   *len = size;
   return 0;
 }
 
+/* ---- probe and status ---- */
+
+/* Memory-controller state after posting. Only read once CONFIG_MEMSIZE says
+ * the card is posted: on a cold card these blocks are not initialised. */
+static void vi_report_mc(vi_dev *v) {
+  struct { const char *name; uint32_t idx; } regs[] = {
+    {"MC_VM_FB_LOCATION", mmMC_VM_FB_LOCATION}, {"MC_VM_FB_OFFSET", mmMC_VM_FB_OFFSET},
+    {"MC_SHARED_CHMAP", mmMC_SHARED_CHMAP}, {"MC_ARB_RAMCFG", mmMC_ARB_RAMCFG},
+    {"MC_SEQ_MISC0", mmMC_SEQ_MISC0}, {"MC_SEQ_SUP_CNTL", mmMC_SEQ_SUP_CNTL},
+    {"MC_SEQ_TRAIN_WAKEUP_CNTL", mmMC_SEQ_TRAIN_WAKEUP_CNTL}, {"HDP_NONSURFACE_BASE", mmHDP_NONSURFACE_BASE},
+    {"HDP_NONSURFACE_INFO", mmHDP_NONSURFACE_INFO}, {"HDP_NONSURFACE_SIZE", mmHDP_NONSURFACE_SIZE},
+    {"BIF_FB_EN", mmBIF_FB_EN},
+  };
+  for (size_t i = 0; i < sizeof regs / sizeof regs[0]; i++) {
+    uint32_t x = vi_rreg(v, regs[i].idx);
+    if (v->err) return;
+    printf("  %-26s 0x%08x", regs[i].name, x);
+    if (regs[i].idx == mmMC_VM_FB_LOCATION)
+      printf("   VRAM at MC 0x%010llx-0x%010llx", (unsigned long long)(x & 0xFFFF) << 24,
+             ((unsigned long long)(x >> 16) << 24) | 0xFFFFFF);
+    if (regs[i].idx == mmMC_SEQ_MISC0) printf("   memory type field (MT) = %u", x >> 28);
+    if (regs[i].idx == mmBIF_FB_EN)
+      printf("   host access to VRAM: read %s, write %s", x & BIF_FB_EN__FB_READ_EN_MASK ? "on" : "off",
+             x & BIF_FB_EN__FB_WRITE_EN_MASK ? "on" : "off");
+    printf("\n");
+  }
+}
+
 static int vi_probe(rg_dev *d, const rg_ident *id) {
   (void)id;
-  int r = map_regs(d);
+  vi_dev v;
+  int r = vi_open(&v, d);
   if (r) return r;
 
   uint32_t memsize = 0;
-  if ((r = rg_rreg32(d, VI_REG_BAR, mmCONFIG_MEMSIZE, &memsize))) return r;
-  bool posted = memsize != 0 && memsize != 0xFFFFFFFFu; /* amdgpu_device_need_post() */
+  bool posted = vi_posted(&v, &memsize);
+  if (v.err) return v.err;
   printf("  posted:          %s (CONFIG_MEMSIZE = 0x%08x%s)\n", posted ? "yes" : "NO",
          memsize, posted ? "" : "; nothing has run the VBIOS init, so VRAM is not usable yet");
-  if (posted) { printf("  VRAM:            %u MB\n", memsize); vi_report_mc(d); }
+  if (posted) { printf("  VRAM:            %u MB\n", memsize); vi_report_mc(&v); }
 
   printf("  BIOS scratch:   ");
-  for (int i = 0; i < 8; i++) {
-    uint32_t v = 0;
-    if ((r = rg_rreg32(d, VI_REG_BAR, mmBIOS_SCRATCH_0 + 4u * (uint32_t)i, &v))) return r;
-    printf(" %08x", v);
-  }
+  for (uint32_t i = 0; i < 8; i++) printf(" %08x", vi_rreg(&v, mmBIOS_SCRATCH_0 + i));
   printf("\n");
+  if (v.err) return v.err;
 
   uint8_t *bios = NULL;
   size_t len = 0;
@@ -123,23 +202,53 @@ static int vi_probe(rg_dev *d, const rg_ident *id) {
   return 0;
 }
 
-static int read_memsize(rg_dev *d, uint32_t *memsize) {
-  int r = map_regs(d);
-  return r ? r : rg_rreg32(d, VI_REG_BAR, mmCONFIG_MEMSIZE, memsize);
+/* `rawgpu status`: read-only snapshot of the engines rawgpu brings up. */
+static int cmd_status(rg_dev *d, const rg_ident *id, int argc, char **argv) {
+  (void)id; (void)argc; (void)argv;
+  vi_dev v;
+  int r = vi_open(&v, d);
+  if (r) return r;
+  uint32_t memsize;
+  bool posted = vi_posted(&v, &memsize);
+  printf("posted:                %s (CONFIG_MEMSIZE = %u MB)\n", posted ? "yes" : "NO", memsize);
+  if (!posted) return v.err;
+
+  uint32_t srbm = vi_rreg(&v, mmSRBM_STATUS), srbm2 = vi_rreg(&v, mmSRBM_STATUS2);
+  uint32_t grbm = vi_rreg(&v, mmGRBM_STATUS);
+  printf("SRBM_STATUS            0x%08x   SRBM_STATUS2 0x%08x   GRBM_STATUS 0x%08x\n", srbm, srbm2, grbm);
+  printf("GB_ADDR_CONFIG         0x%08x\n", vi_rreg(&v, mmGB_ADDR_CONFIG));
+
+  /* SMC: smu7_is_smc_ram_running() and the firmware's "interrupts enabled" flag */
+  uint32_t ck = vi_rsmc(&v, ixSMC_SYSCON_CLOCK_CNTL_0), pc = vi_rsmc(&v, ixSMC_PC_C);
+  uint32_t flags = vi_rsmc(&v, ixFIRMWARE_FLAGS), smufw = vi_rsmc(&v, ixSMU_FIRMWARE);
+  bool ram = !REG_GET_FIELD(ck, SMC_SYSCON_CLOCK_CNTL_0, ck_disable) && pc >= 0x20100;
+  printf("SMC                    clock %s, PC 0x%08x (%s), FIRMWARE_FLAGS 0x%08x (%s), SMU_FIRMWARE 0x%08x\n",
+         REG_GET_FIELD(ck, SMC_SYSCON_CLOCK_CNTL_0, ck_disable) ? "off" : "on", pc,
+         ram ? "running from RAM: driver firmware loaded" : "boot ROM", flags,
+         REG_GET_FIELD(flags, FIRMWARE_FLAGS, INTERRUPTS_ENABLED) ? "firmware up" : "no firmware", smufw);
+
+  printf("RLC_CNTL               0x%08x   RLC_STAT 0x%08x   CP_MEC_CNTL 0x%08x   CP_ME_CNTL 0x%08x\n",
+         vi_rreg(&v, mmRLC_CNTL), vi_rreg(&v, mmRLC_STAT), vi_rreg(&v, mmCP_MEC_CNTL), vi_rreg(&v, mmCP_ME_CNTL));
+  vi_gmc_report(&v);
+  vi_sdma_report(&v);
+  return v.err;
 }
+
+/* ---- post ---- */
 
 static rg_atom *open_atom(rg_dev *d, FILE *trace, bool trace_ops) {
   uint8_t *bios = NULL;
   size_t len = 0;
   if (vi_vbios_read(d, &bios, &len)) return NULL;
-  rg_atom_cfg cfg = {.reg_bar = VI_REG_BAR, .mm_index = mmMM_INDEX, .mm_data = mmMM_DATA,
-                     .flush_reg = mmBIOS_SCRATCH_0, .trace = trace, .trace_ops = trace_ops};
+  rg_atom_cfg cfg = {.reg_bar = VI_REG_BAR, .mm_index = mmMM_INDEX * 4, .mm_data = mmMM_DATA * 4,
+                     .flush_reg = mmBIOS_SCRATCH_0 * 4, .trace = trace, .trace_ops = trace_ops};
   rg_atom *a = rg_atom_open(d, bios, len, &cfg);
   free(bios);
   return a;
 }
 
-static int vi_atom_info(rg_dev *d) {
+static int cmd_atom_info(rg_dev *d, const rg_ident *id, int argc, char **argv) {
+  (void)id; (void)argc; (void)argv;
   rg_atom *a = open_atom(d, NULL, false);
   if (!a) return -EIO;
   rg_atom_print_info(a);
@@ -147,56 +256,39 @@ static int vi_atom_info(rg_dev *d) {
   return 0;
 }
 
-/* Memory-controller state after posting. Only read once CONFIG_MEMSIZE says
- * the card is posted: on a cold card these blocks are not initialised. */
-static void vi_report_mc(rg_dev *d) {
-  struct { const char *name; uint32_t off; } regs[] = {
-    {"MC_VM_FB_LOCATION", mmMC_VM_FB_LOCATION}, {"MC_VM_FB_OFFSET", mmMC_VM_FB_OFFSET},
-    {"MC_SHARED_CHMAP", mmMC_SHARED_CHMAP}, {"MC_ARB_RAMCFG", mmMC_ARB_RAMCFG},
-    {"MC_SEQ_MISC0", mmMC_SEQ_MISC0}, {"MC_SEQ_SUP_CNTL", mmMC_SEQ_SUP_CNTL},
-    {"MC_SEQ_TRAIN_WAKEUP_CNTL", mmMC_SEQ_TRAIN_WAKEUP_CNTL}, {"HDP_NONSURFACE_BASE", mmHDP_NONSURFACE_BASE},
-    {"HDP_NONSURFACE_INFO", mmHDP_NONSURFACE_INFO}, {"HDP_NONSURFACE_SIZE", mmHDP_NONSURFACE_SIZE},
-    {"BIF_FB_EN", mmBIF_FB_EN},
-  };
-  for (size_t i = 0; i < sizeof regs / sizeof regs[0]; i++) {
-    uint32_t v = 0;
-    if (rg_rreg32(d, VI_REG_BAR, regs[i].off, &v)) return;
-    printf("  %-26s 0x%08x", regs[i].name, v);
-    if (regs[i].off == mmMC_VM_FB_LOCATION)
-      printf("   VRAM at MC 0x%010llx-0x%010llx", (unsigned long long)(v & 0xFFFF) << 24,
-             ((unsigned long long)(v >> 16) << 24) | 0xFFFFFF);
-    if (regs[i].off == mmMC_SEQ_MISC0) printf("   memory type field (MT) = %u", v >> 28);
-    if (regs[i].off == mmBIF_FB_EN)
-      printf("   host access to VRAM: read %s, write %s", v & BIF_FB_EN__FB_READ_EN_MASK ? "on" : "off",
-             v & BIF_FB_EN__FB_WRITE_EN_MASK ? "on" : "off");
-    printf("\n");
+static int cmd_post(rg_dev *d, const rg_ident *id, int argc, char **argv) {
+  (void)id;
+  const char *trace_path = NULL;
+  bool trace_ops = false, force = false;
+  for (int i = 0; i < argc; i++) {
+    if (!strcmp(argv[i], "--trace") && i + 1 < argc) trace_path = argv[++i];
+    else if (!strcmp(argv[i], "--trace-ops")) trace_ops = true;
+    else if (!strcmp(argv[i], "--force")) force = true;
+    else return -EINVAL;
   }
-}
 
-static int vi_post(rg_dev *d, const rg_post_opts *o) {
-  uint32_t memsize;
-  int r = read_memsize(d, &memsize);
+  vi_dev v;
+  int r = vi_open(&v, d);
   if (r) return r;
-  bool posted = memsize != 0 && memsize != 0xFFFFFFFFu;
-  if (posted && !o->force) {
+  uint32_t memsize;
+  bool posted = vi_posted(&v, &memsize);
+  if (v.err) return v.err;
+  if (posted && !force) {
     printf("already posted (CONFIG_MEMSIZE = %u MB); nothing to do. --force re-runs ASIC_Init.\n", memsize);
     return 0;
   }
 
   FILE *trace = NULL;
-  if (o->trace_path && !(trace = fopen(o->trace_path, "w"))) { perror(o->trace_path); return -EIO; }
-  rg_atom *a = open_atom(d, trace, o->trace_ops);
+  if (trace_path && !(trace = fopen(trace_path, "w"))) { perror(trace_path); return -EIO; }
+  rg_atom *a = open_atom(d, trace, trace_ops);
   if (!a) { if (trace) fclose(trace); return -EIO; }
   rg_atom_print_info(a);
 
   /* amdgpu_atombios_scratch_regs_init(): BIOS controls backlight, no mode switching, clear DPMS state */
-  uint32_t s2, s6;
-  if ((r = rg_rreg32(d, VI_REG_BAR, mmBIOS_SCRATCH_0 + 8, &s2)) ||
-      (r = rg_rreg32(d, VI_REG_BAR, mmBIOS_SCRATCH_0 + 24, &s6))) goto out;
-  s2 &= ~(ATOM_S2_VRI_BRIGHT_ENABLE | ATOM_S2_DEVICE_DPMS_STATE);
-  s6 |= ATOM_S6_ACC_BLOCK_DISPLAY_SWITCH;
-  if ((r = rg_wreg32(d, VI_REG_BAR, mmBIOS_SCRATCH_0 + 8, s2)) ||
-      (r = rg_wreg32(d, VI_REG_BAR, mmBIOS_SCRATCH_0 + 24, s6))) goto out;
+  uint32_t s2 = vi_rreg(&v, mmBIOS_SCRATCH_2), s6 = vi_rreg(&v, mmBIOS_SCRATCH_6);
+  vi_wreg(&v, mmBIOS_SCRATCH_2, s2 & ~(ATOM_S2_VRI_BRIGHT_ENABLE | ATOM_S2_DEVICE_DPMS_STATE));
+  vi_wreg(&v, mmBIOS_SCRATCH_6, s6 | ATOM_S6_ACC_BLOCK_DISPLAY_SWITCH);
+  if ((r = v.err)) goto out;
 
   printf("running ASIC_Init...\n");
   fflush(stdout);
@@ -208,22 +300,17 @@ static int vi_post(rg_dev *d, const rg_post_opts *o) {
          st.delay_us / 1000.0);
   if (r) goto out;
 
-  if ((r = read_memsize(d, &memsize))) goto out;
-  posted = memsize != 0 && memsize != 0xFFFFFFFFu;
+  posted = vi_posted(&v, &memsize);
   printf("posted:            %s (CONFIG_MEMSIZE = %u MB)\n", posted ? "yes" : "NO", memsize);
-  if (posted) vi_report_mc(d);
-  else r = -EIO;
+  if (posted) vi_report_mc(&v);
+  else r = v.err ? v.err : -EIO;
 out:
   rg_atom_close(a);
-  if (trace) { fclose(trace); printf("trace: %s\n", o->trace_path); }
+  if (trace) { fclose(trace); printf("trace: %s\n", trace_path); }
   return r;
 }
 
-static double now_s(void) {
-  struct timespec t;
-  clock_gettime(CLOCK_MONOTONIC, &t);
-  return (double)t.tv_sec + t.tv_nsec / 1e9;
-}
+/* ---- vram-test ---- */
 
 /* Fills/validates `n` dwords with a pattern unique to (seed, index). */
 static uint32_t pat(uint32_t seed, size_t i) {
@@ -232,22 +319,27 @@ static uint32_t pat(uint32_t seed, size_t i) {
   return x;
 }
 
-#define mmMM_INDEX_HI (0x6U * 4)
-
 /* One dword of VRAM through the indirect window: MM_INDEX bit 31 selects the FB aperture. */
-static int vram_mm_access(rg_dev *d, uint64_t pos, uint32_t wval, bool write, uint32_t *rval) {
-  int r;
-  if ((r = rg_wreg32(d, VI_REG_BAR, mmMM_INDEX, (uint32_t)pos | 0x80000000u))) return r;
-  if ((r = rg_wreg32(d, VI_REG_BAR, mmMM_INDEX_HI, (uint32_t)(pos >> 31)))) return r;
-  return write ? rg_wreg32(d, VI_REG_BAR, mmMM_DATA, wval) : rg_rreg32(d, VI_REG_BAR, mmMM_DATA, rval);
+static uint32_t vram_mm_access(vi_dev *v, uint64_t pos, uint32_t wval, bool write) {
+  vi_wreg(v, mmMM_INDEX, (uint32_t)pos | 0x80000000u);
+  vi_wreg(v, mmMM_INDEX_HI, (uint32_t)(pos >> 31));
+  if (write) { vi_wreg(v, mmMM_DATA, wval); return 0; }
+  return vi_rreg(v, mmMM_DATA);
 }
 
-static int vi_vram_test(rg_dev *d, bool enable_fb) {
-  uint32_t memsize, fb_en;
-  int r = read_memsize(d, &memsize);
+static int cmd_vram_test(rg_dev *d, const rg_ident *id, int argc, char **argv) {
+  (void)id;
+  bool enable_fb = argc > 0 && !strcmp(argv[0], "--enable-fb");
+  vi_dev v;
+  int r = vi_open(&v, d);
   if (r) return r;
-  if (memsize == 0 || memsize == 0xFFFFFFFFu) { fprintf(stderr, "rawgpu: card is not posted; run `rawgpu post` first\n"); return -EIO; }
-  if ((r = rg_rreg32(d, VI_REG_BAR, mmBIF_FB_EN, &fb_en))) return r;
+  uint32_t memsize;
+  if (!vi_posted(&v, &memsize)) {
+    if (v.err) return v.err;
+    fprintf(stderr, "rawgpu: card is not posted; run `rawgpu post` first\n");
+    return -EIO;
+  }
+  uint32_t fb_en = vi_rreg(&v, mmBIF_FB_EN);
   uint32_t want = BIF_FB_EN__FB_READ_EN_MASK | BIF_FB_EN__FB_WRITE_EN_MASK;
   if ((fb_en & want) != want) {
     if (!enable_fb) {
@@ -255,9 +347,10 @@ static int vi_vram_test(rg_dev *d, bool enable_fb) {
                       "        amdgpu's gmc_v8_0_mc_program() does.\n", fb_en);
       return -EACCES;
     }
-    if ((r = rg_wreg32(d, VI_REG_BAR, mmBIF_FB_EN, fb_en | want))) return r;
+    vi_wreg(&v, mmBIF_FB_EN, fb_en | want);
     printf("BIF_FB_EN: 0x%x -> 0x%x\n", fb_en, fb_en | want);
   }
+  if (v.err) return v.err;
 
   uint64_t bar = 0;
   if ((r = rg_bar_map(d, VI_VRAM_BAR, &bar))) return r;
@@ -270,17 +363,16 @@ static int vi_vram_test(rg_dev *d, bool enable_fb) {
   for (size_t k = 0; k < 3; k++) {
     if (offs[k] + sizeof buf > bar) continue;
     for (size_t i = 0; i < N; i++) buf[i] = pat((uint32_t)k + 1, i);
-    double t0 = now_s();
+    double t0 = vi_now();
     if ((r = d->ops->mmio_write(d, VI_VRAM_BAR, offs[k], buf, sizeof buf))) return r;
-    uint32_t sync;
-    if ((r = rg_rreg32(d, VI_REG_BAR, mmBIOS_SCRATCH_0, &sync))) return r; /* drain writes */
-    wt += now_s() - t0;
+    vi_rreg(&v, mmBIOS_SCRATCH_0); /* drain writes */
+    wt += vi_now() - t0;
   }
   for (size_t k = 0; k < 3; k++) { /* read back only after all writes: catches aliasing */
     if (offs[k] + sizeof got > bar) continue;
-    double t0 = now_s();
+    double t0 = vi_now();
     if ((r = d->ops->mmio_read(d, VI_VRAM_BAR, offs[k], got, sizeof got))) return r;
-    rt += now_s() - t0;
+    rt += vi_now() - t0;
     int mism = 0;
     for (size_t i = 0; i < N; i++) mism += got[i] != pat((uint32_t)k + 1, i);
     printf("  VRAM +%4llu MB: %s", (unsigned long long)(offs[k] >> 20), mism ? "MISMATCH" : "OK");
@@ -298,32 +390,130 @@ static int vi_vram_test(rg_dev *d, bool enable_fb) {
   const uint64_t far[] = {1ull << 30, 4ull << 30, vram - (1ull << 20)};
   enum { M = 256 };
   for (size_t k = 0; k < 3 && far[k] + 4 * M <= vram; k++)
-    for (size_t i = 0; i < M; i++)
-      if ((r = vram_mm_access(d, far[k] + 4 * i, pat((uint32_t)k + 11, i), true, NULL))) return r;
+    for (size_t i = 0; i < M; i++) vram_mm_access(&v, far[k] + 4 * i, pat((uint32_t)k + 11, i), true);
   for (size_t k = 0; k < 4; k++) {
     uint64_t base = k < 3 ? far[k] : offs[0];
     uint32_t seed = k < 3 ? (uint32_t)k + 11 : 1;
     if (base + 4 * M > vram) continue;
     int mism = 0;
-    for (size_t i = 0; i < M; i++) {
-      uint32_t v;
-      if ((r = vram_mm_access(d, base + 4 * i, 0, false, &v))) return r;
-      mism += v != pat(seed, i);
-    }
+    for (size_t i = 0; i < M; i++) mism += vram_mm_access(&v, base + 4 * i, 0, false) != pat(seed, i);
+    if (v.err) return v.err;
     printf("  VRAM +%5llu MB (MM_INDEX%s): %s\n", (unsigned long long)(base >> 20),
            k == 3 ? ", re-reading the BAR-written region" : "", mism ? "MISMATCH" : "OK");
     bad += mism != 0;
   }
-  return bad ? -EIO : 0;
+  return bad ? -EIO : v.err;
 }
+
+/* `rawgpu regs PATTERN...`: read registers by name (shell-style patterns). Data
+ * ports and ucode windows advance on every read, so a pattern only reaches
+ * them when it names them exactly. */
+static const struct { const char *name; uint32_t idx; } vi_regnames[] = {
+#include "amd_vi_regnames.inc"
+};
+
+static bool side_effect_read(const char *name) {
+  return strstr(name, "_DATA") || strstr(name, "UCODE") || !strncmp(name, "MM_", 3) || !strncmp(name, "SMC_IND_", 8);
+}
+
+static int cmd_regs(rg_dev *d, const rg_ident *id, int argc, char **argv) {
+  (void)id;
+  if (argc < 1) return -EINVAL;
+  vi_dev v;
+  int r = vi_open(&v, d);
+  if (r) return r;
+  int shown = 0;
+  for (size_t i = 0; i < sizeof vi_regnames / sizeof vi_regnames[0]; i++) {
+    for (int k = 0; k < argc; k++) {
+      const char *n = vi_regnames[i].name;
+      bool exact = !strcmp(argv[k], n);
+      if (!exact && (fnmatch(argv[k], n, 0) || side_effect_read(n))) continue;
+      printf("%-44s [0x%05x] 0x%08x\n", n, vi_regnames[i].idx, vi_rreg(&v, vi_regnames[i].idx));
+      shown++;
+      break;
+    }
+  }
+  if (!shown) fprintf(stderr, "rawgpu: no register in src/amd_vi_regnames.inc matches\n");
+  return v.err;
+}
+
+/* `rawgpu asic-reset`: vi_asic_pci_config_reset(), amdgpu's full ("legacy")
+ * reset for VI when BACO is unavailable (BACO needs SMC firmware). Bus mastering
+ * is off during the reset, so nothing the engines had in flight can land
+ * afterwards. The card comes back unposted. */
+static int cmd_asic_reset(rg_dev *d, const rg_ident *id, int argc, char **argv) {
+  (void)id; (void)argc; (void)argv;
+  vi_dev v;
+  int r = vi_open(&v, d);
+  if (r) return r;
+  uint32_t cmd;
+  if ((r = rg_cfg_read(d, 0x04, 2, &cmd))) return r;
+  vi_wreg(&v, mmBIOS_SCRATCH_3, vi_rreg(&v, mmBIOS_SCRATCH_3) | ATOM_S3_ASIC_GUI_ENGINE_HUNG);
+  if (v.err) return v.err;
+  if ((r = rg_cfg_write(d, 0x04, 2, cmd & ~0x4u))) return r; /* pci_clear_master() */
+  if ((r = rg_cfg_write(d, 0x7c, 4, AMDGPU_ASIC_RESET_DATA))) return r;
+  vi_udelay(100);
+  double t0 = vi_now();
+  uint32_t m = 0xFFFFFFFFu;
+  while ((m = vi_rreg(&v, mmCONFIG_MEMSIZE)) == 0xFFFFFFFFu && !v.err && vi_now() - t0 < 1.0) {}
+  double dt = vi_now() - t0;
+  r = rg_cfg_write(d, 0x04, 2, cmd | 0x4u); /* pci_set_master() */
+  if (v.err || r) return v.err ? v.err : r;
+  if (m == 0xFFFFFFFFu) { fprintf(stderr, "rawgpu: card did not come back from reset within 1 s\n"); return -ETIMEDOUT; }
+  vi_wreg(&v, mmBIOS_SCRATCH_3, vi_rreg(&v, mmBIOS_SCRATCH_3) & ~ATOM_S3_ASIC_GUI_ENGINE_HUNG);
+  printf("ASIC reset: registers back after %.1f ms; CONFIG_MEMSIZE = %u (%s)\n", dt * 1e3, m,
+         m ? "still posted" : "unposted: run `rawgpu post`");
+  rg_pci_err e;
+  if (!rg_pci_errors(d, &e)) rg_pci_print_errors(&e);
+  return v.err;
+}
+
+/* `rawgpu soft-reset`: amdgpu's per-block soft resets for the blocks rawgpu
+ * drives, applied only to the ones that report busy. */
+static int cmd_soft_reset(rg_dev *d, const rg_ident *id, int argc, char **argv) {
+  (void)id; (void)argc; (void)argv;
+  vi_dev v;
+  int r = vi_open(&v, d);
+  if (r) return r;
+  printf("before: SRBM_STATUS 0x%08x SRBM_STATUS2 0x%08x\n", vi_rreg(&v, mmSRBM_STATUS), vi_rreg(&v, mmSRBM_STATUS2));
+  vi_sdma_stop(&v, 0);
+  vi_sdma_stop(&v, 1);
+  if (vi_rreg(&v, mmSRBM_STATUS2) & (SRBM_STATUS2__SDMA_BUSY_MASK | SRBM_STATUS2__SDMA1_BUSY_MASK)) {
+    vi_sdma_soft_reset(&v);
+    printf("SDMA soft reset\n");
+  }
+  uint32_t bits = vi_gmc_soft_reset(&v);
+  if (bits) printf("GMC soft reset (SRBM_SOFT_RESET bits 0x%08x)\n", bits);
+  vi_wreg(&v, mmVM_CONTEXT0_CNTL2, VM_CONTEXT0_CNTL2__CLEAR_PROTECTION_FAULT_STATUS_ADDR_MASK); /* clear latched fault */
+  vi_wreg(&v, mmVM_CONTEXT0_CNTL2, 0);
+  printf("after:  SRBM_STATUS 0x%08x SRBM_STATUS2 0x%08x VM0 fault 0x%08x\n", vi_rreg(&v, mmSRBM_STATUS),
+         vi_rreg(&v, mmSRBM_STATUS2), vi_rreg(&v, mmVM_CONTEXT0_PROTECTION_FAULT_STATUS));
+  rg_pci_err e;
+  if (!rg_pci_errors(d, &e)) rg_pci_print_errors(&e);
+  return v.err;
+}
+
+int vi_cmd_sdma_test(rg_dev *d, const rg_ident *id, int argc, char **argv); /* amd_vi_sdma.c */
+
+static const rg_cmd vi_cmds[] = {
+  {"status", "", "engine, VM and SMC state (read-only)", cmd_status},
+  {"regs", "PATTERN...", "read registers by name, e.g. 'SDMA0_GFX_*' (read-only)", cmd_regs},
+  {"soft-reset", "", "WRITES: amdgpu's soft reset of SDMA and the memory controller, if busy", cmd_soft_reset},
+  {"asic-reset", "", "WRITES: full ASIC reset through PCI config (amdgpu's legacy VI reset)", cmd_asic_reset},
+  {"atom-info", "", "list the VBIOS command tables and ASIC_Init parameters (no writes)", cmd_atom_info},
+  {"post", "[--trace FILE] [--trace-ops] [--force]", "WRITES: run the VBIOS ASIC_Init so the card's memory works",
+   cmd_post},
+  {"vram-test", "[--enable-fb]", "WRITES VRAM: pattern test through BAR0 (needs a posted card)", cmd_vram_test},
+  {"sdma-test", "[MB] [--engine 0|1] [--vram-only] [--host-ring] [--fw DIR] [--trace FILE]",
+   "WRITES: GART + SDMA bring-up, then DMA copies host<->VRAM with timing", vi_cmd_sdma_test},
+  {0},
+};
 
 const rg_backend rg_backend_amd_vi = {
   .name = "amd-vi",
   .reg_bar = VI_REG_BAR,
-  .safe_reg = mmBIOS_SCRATCH_0,
+  .safe_reg = mmBIOS_SCRATCH_0 * 4,
   .probe = vi_probe,
   .vbios_read = vi_vbios_read,
-  .atom_info = vi_atom_info,
-  .post = vi_post,
-  .vram_test = vi_vram_test,
+  .cmds = vi_cmds,
 };
