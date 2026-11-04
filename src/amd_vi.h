@@ -46,6 +46,9 @@ double vi_now(void);
  * write it directly, above the first 16 MB that the VBIOS and VGA may use. */
 #define VI_VRAM_GART_TABLE (16ull << 20) /* GART page table */
 #define VI_VRAM_SCRATCH    (20ull << 20) /* system-aperture default page */
+#define VI_VRAM_SMU_TOC    (24ull << 20) /* SMU_DRAMData_TOC: where each engine's microcode is */
+#define VI_VRAM_SMU_BUF    (25ull << 20) /* the SMU's own 800 KB work buffer */
+#define VI_VRAM_UCODE      (26ull << 20) /* engine microcode images, as the SMU loads them */
 #define VI_VRAM_FREE       (32ull << 20) /* first byte free for users */
 
 typedef struct {
@@ -61,6 +64,26 @@ void vi_hdp_flush(vi_dev *v);
 void vi_hdp_invalidate(vi_dev *v);
 void vi_gmc_report(vi_dev *v);
 uint32_t vi_gmc_soft_reset(vi_dev *v);
+/* CPU writes to VRAM through BAR0 (offset < BAR size). Follow with vi_hdp_flush()
+ * before an engine reads the data. */
+int vi_vram_write(vi_dev *v, uint64_t off, const void *src, size_t len);
+int vi_vram_zero(vi_dev *v, uint64_t off, size_t len);
+
+/* ---- SMU7: SMC firmware and SMU-loaded engine microcode (amd_vi_smu.c) ---- */
+
+/* UcodeLoadStatus bits (smu_ucode_xfer_vi.h UCODE_ID_*_MASK) */
+#define VI_UCODE_SDMA0  0x002u
+#define VI_UCODE_SDMA1  0x004u
+#define VI_UCODE_CP_CE  0x008u
+#define VI_UCODE_CP_PFP 0x010u
+#define VI_UCODE_CP_ME  0x020u
+#define VI_UCODE_CP_MEC 0x040u
+#define VI_UCODE_RLC_G  0x400u
+
+bool vi_smc_running(vi_dev *v);                       /* smu7_is_smc_ram_running() */
+int vi_smu_ucode_status(vi_dev *v, uint32_t *status); /* UcodeLoadStatus; -ENODEV if the SMC firmware is not up */
+int vi_temp_c(vi_dev *v);                             /* GPU temperature in degrees C */
+void vi_smu_report(vi_dev *v);
 
 /* ---- SDMA v3 (amd_vi_sdma.c) ---- */
 
@@ -82,7 +105,15 @@ typedef struct {
   uint32_t seq;
 } vi_sdma;
 
-int vi_sdma_load_ucode(vi_dev *v, int me, const amd_fw *fw);
+/* Every SMU-loaded image ends in a 20-byte digest (smu_ucode_xfer_vi.h
+ * SMU_DIGEST_SIZE_BYTES). The SMU checks it and does not store it in the
+ * engine's RAM (docs/LOG.md, 2026-11-04). */
+#define VI_SMU_DIGEST_DW 5u
+
+/* Reads a halted engine's microcode RAM back and compares it with the image,
+ * less its digest. Returns the number of mismatched dwords (first one in
+ * *first_bad), or a negative error. Restores UCODE_ADDR. */
+int vi_sdma_check_ucode(vi_dev *v, int me, const amd_fw *fw, uint32_t *first_bad);
 int vi_sdma_soft_reset(vi_dev *v);
 int vi_sdma_start(vi_sdma *s, vi_dev *v, int me, vi_mem ring, uint32_t ring_bytes, vi_mem wb);
 void vi_sdma_stop(vi_dev *v, int me);

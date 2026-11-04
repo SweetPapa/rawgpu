@@ -61,11 +61,17 @@ static int mc_wait_idle(vi_dev *v) { /* gmc_v8_0_wait_for_idle() */
   return v->err;
 }
 
-/* Zero `len` bytes of VRAM at `off` through BAR0. */
-static int vram_zero(vi_dev *v, uint64_t off, size_t len) {
+int vi_vram_write(vi_dev *v, uint64_t off, const void *src, size_t len) {
+  if (v->err) return v->err;
+  int r = v->d->ops->mmio_write(v->d, VI_VRAM_BAR, off, src, len);
+  if (r) v->err = r;
+  return r;
+}
+
+int vi_vram_zero(vi_dev *v, uint64_t off, size_t len) {
   void *z = calloc(1, len);
   if (!z) return -ENOMEM;
-  int r = v->d->ops->mmio_write(v->d, VI_VRAM_BAR, off, z, len);
+  int r = vi_vram_write(v, off, z, len);
   free(z);
   return r;
 }
@@ -176,8 +182,8 @@ int vi_gmc_init(vi_dev *v, vi_gart *g, uint64_t dummy_page_bus) {
   if (v->err) return v->err;
 
   /* Stale VRAM can look like valid PTEs, so clear the whole table before enabling it. */
-  int r = vram_zero(v, VI_VRAM_GART_TABLE, (size_t)(g->gart_size >> 12) * 8);
-  if (!r) r = vram_zero(v, VI_VRAM_SCRATCH, 4096);
+  int r = vi_vram_zero(v, VI_VRAM_GART_TABLE, (size_t)(g->gart_size >> 12) * 8);
+  if (!r) r = vi_vram_zero(v, VI_VRAM_SCRATCH, 4096);
   if (r) return r;
   vi_hdp_flush(v);
   gart_enable(v, g, dummy_page_bus);

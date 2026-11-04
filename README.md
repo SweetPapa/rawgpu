@@ -9,17 +9,19 @@ Apple-signed DriverKit extension that hands raw PCIe access (config space, BAR
 MMIO, DMA buffers) to userspace. On top of that, rawgpu is a small C codebase
 that identifies the card and, family by family, brings it up.
 
-**Status:** stage 3 of 5, in progress. The first card is a PowerColor RX 590
-(Polaris 30).
+**Status:** stages 1–3 of 5 done; stage 4 (compute) is next. The first card
+is a PowerColor RX 590 (Polaris 30).
 
 - **Posting works.** rawgpu posts the card from userspace: Linux amdgpu's own
   ATOM interpreter, unmodified, runs the VBIOS `ASIC_Init`. That brings up the
   voltage regulators and trains the GDDR5, and all 8 GB of VRAM then reads and
   writes correctly.
-- **GART and DMA-engine code is written.** The GART page tables check out.
-- **The engines need their microcode loaded by the SMC.** Polaris ignores
-  microcode written by the host, so porting amdgpu's SMC firmware loader
-  comes next.
+- **The SMC runs AMD's firmware and loads the engines' microcode.** Polaris
+  ignores microcode written by the host. rawgpu ports amdgpu's SMU loader:
+  the boot ROM accepts the signed `polaris10_k2_smc.bin`, and the firmware
+  loads the SDMA, RLC and CP images from VRAM.
+- **DMA works.** Both SDMA engines copy host → VRAM at 2.8 GB/s and
+  VRAM → host at 3.1 GB/s through the GART, verified word for word.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) and [docs/LOG.md](docs/LOG.md).
 
@@ -30,9 +32,16 @@ tools/install-tinygpu.sh      # verified install; then approve it in System Sett
 tools/fetch-firmware.sh       # pinned, hash-checked AMD firmware into local/ (never committed)
 make
 ./build/rawgpu probe
-./build/rawgpu post           # after each power-on of the card
+./build/rawgpu post           # after each power-on of the card, and after the Mac sleeps
 ./build/rawgpu vram-test
+./build/rawgpu smc-load       # SMC firmware + engine microcode, once per post
+./build/rawgpu sdma-test      # DMA host <-> VRAM, with bandwidth
 ```
+
+**Keep the Mac awake while the card holds state.** Sleep resets the card (the
+memory controller comes back untrained), and macOS does not report it. Use
+`caffeinate -i` around long jobs. After a sleep, run `post` and `smc-load`
+again.
 
 Approve the driver at System Settings → General → Login Items & Extensions →
 Driver Extensions → TinyGPU. Check that it bound with
@@ -48,10 +57,11 @@ Driver Extensions → TinyGPU. Check that it bound with
 | `rawgpu atom-info` | Lists the VBIOS command tables and boot clocks | VBIOS read only |
 | `rawgpu post [--trace F] [--trace-ops]` | Runs the VBIOS `ASIC_Init` | **Writes**: clocks, voltages, memory training |
 | `rawgpu vram-test [--enable-fb]` | Pattern test through BAR0 and the indirect window | **Writes** a few KB of VRAM |
-| `rawgpu status` | Engine, VM and SMC state | Reads only |
+| `rawgpu status` | Engine, VM, SMC and microcode state; temperature | Reads only |
 | `rawgpu regs PATTERN...` | Reads registers by name, e.g. `'SDMA0_*'` | Reads only; skips data ports unless named exactly |
 | `rawgpu cfg [--clear-errors]` | Config space, plus PCI/PCIe/AER error status | Config reads (clearing writes the status bits) |
-| `rawgpu sdma-test [MB] ...` | GART + SDMA bring-up, copy tests with timing | **Writes**: VM setup, engine microcode, VRAM |
+| `rawgpu smc-load [--force]` | Starts the SMC firmware; it loads the SDMA, RLC and CP microcode from VRAM | **Writes**: SMC RAM, 8 MB of reserved VRAM. Lasts until the card loses power |
+| `rawgpu sdma-test [MB] ...` | GART + SDMA bring-up, copy and fill tests with timing (MB ≤ 127) | **Writes**: VM setup, VRAM, host buffers. Needs `smc-load` first |
 | `rawgpu soft-reset` | amdgpu's SDMA/MC soft reset for blocks that report busy | **Writes**; see the recovery notes in the roadmap |
 | `rawgpu reset`, `rawgpu asic-reset` | PCIe reset / amdgpu's PCI-config reset | **Writes**; neither had any effect on this card |
 
@@ -87,6 +97,7 @@ src/family.c             PCI ID -> family -> backend   (+ generated src/amd_ids.
 src/amd_vi.c             AMD GCN3/4 backend: register helpers, probe, VBIOS, post, commands
 src/amd_vi_gmc.c         GMC v8: VRAM placement and the VMID0 GART
 src/amd_vi_sdma.c        SDMA v3 rings, copies, fences; sdma-test
+src/amd_vi_smu.c         SMU7: SMC firmware start and SMU-loaded engine microcode; smc-load
 src/amd_vi_regs.h        generated register subset (tools/gen_vi_regs.py)
 src/amd_fw.c             AMD firmware file loading and header checks
 src/amd_atom.c           ATOM BIOS header parsing

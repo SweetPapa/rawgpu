@@ -218,14 +218,7 @@ static int cmd_status(rg_dev *d, const rg_ident *id, int argc, char **argv) {
   printf("SRBM_STATUS            0x%08x   SRBM_STATUS2 0x%08x   GRBM_STATUS 0x%08x\n", srbm, srbm2, grbm);
   printf("GB_ADDR_CONFIG         0x%08x\n", vi_rreg(&v, mmGB_ADDR_CONFIG));
 
-  /* SMC: smu7_is_smc_ram_running() and the firmware's "interrupts enabled" flag */
-  uint32_t ck = vi_rsmc(&v, ixSMC_SYSCON_CLOCK_CNTL_0), pc = vi_rsmc(&v, ixSMC_PC_C);
-  uint32_t flags = vi_rsmc(&v, ixFIRMWARE_FLAGS), smufw = vi_rsmc(&v, ixSMU_FIRMWARE);
-  bool ram = !REG_GET_FIELD(ck, SMC_SYSCON_CLOCK_CNTL_0, ck_disable) && pc >= 0x20100;
-  printf("SMC                    clock %s, PC 0x%08x (%s), FIRMWARE_FLAGS 0x%08x (%s), SMU_FIRMWARE 0x%08x\n",
-         REG_GET_FIELD(ck, SMC_SYSCON_CLOCK_CNTL_0, ck_disable) ? "off" : "on", pc,
-         ram ? "running from RAM: driver firmware loaded" : "boot ROM", flags,
-         REG_GET_FIELD(flags, FIRMWARE_FLAGS, INTERRUPTS_ENABLED) ? "firmware up" : "no firmware", smufw);
+  vi_smu_report(&v);
 
   printf("RLC_CNTL               0x%08x   RLC_STAT 0x%08x   CP_MEC_CNTL 0x%08x   CP_ME_CNTL 0x%08x\n",
          vi_rreg(&v, mmRLC_CNTL), vi_rreg(&v, mmRLC_STAT), vi_rreg(&v, mmCP_MEC_CNTL), vi_rreg(&v, mmCP_ME_CNTL));
@@ -494,6 +487,7 @@ static int cmd_soft_reset(rg_dev *d, const rg_ident *id, int argc, char **argv) 
 }
 
 int vi_cmd_sdma_test(rg_dev *d, const rg_ident *id, int argc, char **argv); /* amd_vi_sdma.c */
+int vi_cmd_smc_load(rg_dev *d, const rg_ident *id, int argc, char **argv);  /* amd_vi_smu.c */
 
 static const rg_cmd vi_cmds[] = {
   {"status", "", "engine, VM and SMC state (read-only)", cmd_status},
@@ -504,6 +498,8 @@ static const rg_cmd vi_cmds[] = {
   {"post", "[--trace FILE] [--trace-ops] [--force]", "WRITES: run the VBIOS ASIC_Init so the card's memory works",
    cmd_post},
   {"vram-test", "[--enable-fb]", "WRITES VRAM: pattern test through BAR0 (needs a posted card)", cmd_vram_test},
+  {"smc-load", "[--fw DIR] [--force] [--trace FILE]",
+   "WRITES: start the SMC firmware and have it load the SDMA, RLC and CP microcode", vi_cmd_smc_load},
   {"sdma-test", "[MB] [--engine 0|1] [--vram-only] [--host-ring] [--fw DIR] [--trace FILE]",
    "WRITES: GART + SDMA bring-up, then DMA copies host<->VRAM with timing", vi_cmd_sdma_test},
   {0},

@@ -19,8 +19,12 @@ amdgpu/polaris10_sdma.bin    e27b3ec976f87e32883b9190e653b20d27f9e77da8dd2d77eeb
 amdgpu/polaris10_sdma1.bin   23dd73eb1316d40a681841b4d3d116c5cae6d8317cebe8f5e1f9e5dec6de5c87  SDMA1
 amdgpu/polaris10_rlc.bin     a5d4c2d3acc5c3c4988b95855fe21a5f682552b2b065f76439370835178ccbaf  RLC (compute queue)
 amdgpu/polaris10_mec.bin     c19c1e2e36b47c4a8c25d601f5ae04a26458d98c3000f851d1be5c3a0a424b07  MEC (compute queue)
-amdgpu/polaris10_mec_2.bin   d4914f1166e3b7af212837aaf8f393a155ce3f61f48bb08279c743a2ddea0b6a  MEC, newer variant
+amdgpu/polaris10_mec_2.bin   d4914f1166e3b7af212837aaf8f393a155ce3f61f48bb08279c743a2ddea0b6a  MEC, newer variant (amdgpu prefers it)
 amdgpu/polaris10_mec2.bin    c19c1e2e36b47c4a8c25d601f5ae04a26458d98c3000f851d1be5c3a0a424b07  MEC2
+amdgpu/polaris10_mec2_2.bin  67546c49317168a5ab33ba85503e9893f2dcd974f995402054a306dac246b64f  MEC2, newer variant
+amdgpu/polaris10_ce_2.bin    790ca90f5afa001a858909619a222442bfaec1a1f63c47396d21e0097609e24a  CP CE (smc-load: amdgpu loads all CP images)
+amdgpu/polaris10_pfp_2.bin   bf1ca44ceefd73df8a8e350540d8758d9041e9e2b9cd0bd77e647ed7151ed9eb  CP PFP
+amdgpu/polaris10_me_2.bin    35c778c82c006a28f129186c414c37d7acbdb23fefb4cb84c1f705886f372fdd  CP ME
 amdgpu/polaris10_k2_smc.bin  b5d34a4b0ea0d0c9c53dddcac93e9e01fe759f0ad9a0b0d0b4905e5a6b254d03  SMC on Polaris 30 (power management)
 amdgpu/polaris10_k_mc.bin    78a0e88d669cf91c09cd027ac3b5bd0c08ac126a8488092c567ecda21824e9ad  MC sequencer on Polaris 30
 LICENSES/LICENSE.amdgpu      572872598565dc3513470de971a32bf9db301f47afeef3636345eadae33b2eee  license

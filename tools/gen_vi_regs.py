@@ -63,7 +63,9 @@ REGS = [
     "SMC_MSG_ARG_0", "SMC_SYSCON_CLOCK_CNTL_0", "SMC_SYSCON_RESET_CNTL", "SMC_PC_C",
     "FIRMWARE_FLAGS", "SMU_FIRMWARE", "SMU_STATUS", "SMU_INPUT_DATA", "ROM_INDEX", "ROM_DATA",
     "CG_SPLL_FUNC_CNTL*", "CG_CLKPIN_CNTL", "CG_CLKPIN_CNTL_2", "SMU_SMC_IND_INDEX", "SMU_SMC_IND_DATA",
-    "RCU_UC_EVENTS", "SMC_MSG_ARG_1", "SMC_RESP_1", "SMC_MESSAGE_1", "SMU_STATUS",
+    "RCU_UC_EVENTS", "SMC_MSG_ARG_1", "SMC_RESP_1", "SMC_MESSAGE_1",
+    # thermal: smu7_thermal_get_temperature()
+    "CG_MULT_THERMAL_STATUS",
 ]
 
 DEFINE = re.compile(r"^#define\s+(\S+)\s+(0x[0-9a-fA-F]+|\d+)[uUlL]*\s*$")
@@ -107,7 +109,9 @@ def main():
         hits = [n for n in offsets if fnmatch.fnmatchcase(n[2:], pat)]
         missing += [] if hits else [pat]
         for n in hits:
-            regs.setdefault(n[2:], []).append((n, *offsets[n]))
+            entry = (n, *offsets[n])
+            if entry not in regs.setdefault(n[2:], []):  # a register matched by two patterns
+                regs[n[2:]].append(entry)
     if missing:
         sys.exit("no register matches: " + " ".join(missing))
 

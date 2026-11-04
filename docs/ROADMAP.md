@@ -37,12 +37,10 @@ What we learned:
   card, so this is expected but not yet tested. Run `rawgpu post` after every
   power-on; it is a no-op on an already-posted card.
 
-## Stage 3: firmware, memory, queues (in progress)
+## Stage 3: firmware, memory, DMA ✅ (2026-11-04)
 
-The reference is Linux amdgpu `vi.c`, `gmc_v8_0.c`, `gfx_v8_0.c` and
-`sdma_v3_0.c`, plus `pm/powerplay/smumgr/{smu7,polaris10}_smumgr.c`.
-
-Done:
+The reference is Linux amdgpu `vi.c`, `gmc_v8_0.c` and `sdma_v3_0.c`, plus
+`pm/powerplay/smumgr/{smu7,polaris10}_smumgr.c`.
 
 - `tools/fetch-firmware.sh` fetches pinned, hash-checked blobs from
   `linux-firmware` into `local/`. They are never committed.
@@ -50,36 +48,44 @@ Done:
   fields rawgpu uses, copied by script from amdgpu's headers.
 - **GMC v8 GART** (`src/amd_vi_gmc.c`), as `gmc_v8_0_mc_program()` and
   `gart_enable()` do it. It has a 256 MB VMID0 GART at MC `0xff00000000`, with
-  the page table in VRAM. PTEs carry TinyGPU's bus addresses; PTE readback is
-  verified.
-- **SDMA v3 ring code** (`src/amd_vi_sdma.c`), as `sdma_v3_0_gfx_resume()`
-  does it. The ring and fences can live in VRAM or host memory.
-  `rawgpu sdma-test` runs gated phases: engine, VRAM copy, host write, host
-  read, then round trip and bandwidth.
-- Diagnostics: `status`, `regs PATTERN`, `cfg` (PCI/PCIe/AER errors),
-  `soft-reset`.
+  the page table in VRAM. PTEs carry TinyGPU's bus addresses.
+- **SMC firmware and SMU-loaded microcode** (`src/amd_vi_smu.c`,
+  `rawgpu smc-load`):
+  - It follows `polaris10_start_smu_in_protection_mode()`: upload
+    `polaris10_k2_smc.bin`, after which the boot ROM checks its signature and
+    runs it.
+  - Then `smu7_request_smu_load_fw()`: a TOC in VRAM lists the SDMA, RLC, CE,
+    PFP, ME and MEC images, and `PPSMC_MSG_LoadUcodes` loads them all in 2 ms.
+  - It reads the SDMA microcode RAM back to prove the load.
+- **SDMA v3 rings** (`src/amd_vi_sdma.c`), as `sdma_v3_0_gfx_resume()` does
+  it. The ring and fences can live in VRAM or host memory. `rawgpu sdma-test`
+  runs gated phases, and refuses to unhalt an engine whose microcode RAM does
+  not hold the image.
+- Diagnostics: `status` (now with SMU load state and temperature), `regs
+  PATTERN`, `cfg` (PCI/PCIe/AER errors), `soft-reset`.
+- **Check, passed:** SDMA copies host → VRAM → VRAM → host intact, on both
+  engines, up to 127 MB.
+  - host → VRAM: 2.8 GB/s.
+  - VRAM → host: 3.1 GB/s.
+  - Numbers are in `docs/LOG.md`.
 
 What we learned (see `docs/LOG.md`, 2026-11-04):
 
-- **Polaris will not take engine microcode from the host.** After a direct
-  load, the SDMA microcode RAM still holds its power-on contents. Writes to
-  `SDMA0_UCODE_DATA` are ignored, as the same readback shows on both engines.
-  amdgpu dropped direct loading for VI for this reason. The SMC loads the
-  SDMA, RLC and MEC images.
-
-Next:
-
-- **SMC firmware.** Polaris 30 uses `polaris10_k2_smc.bin`. The SMU here runs
-  in protected mode (`SMU_FIRMWARE`: `SMU_MODE` = 1, `SMU_SEL` = 1), so port
-  `polaris10_start_smu_in_protection_mode()`.
-- **SMU-loaded microcode.** `smu7_request_smu_load_fw()`: a TOC in VRAM lists
-  each image's MC address, then `PPSMC_MSG_LoadUcodes` and a poll of
-  `UcodeLoadStatus`. Images sit in VRAM, so loading needs no host reads.
-- Rerun `sdma-test`. Check that the microcode RAM reads back as the image.
-- **GFX:** RLC, MEC, then one compute queue (an HQD programmed from an MQD).
-- No interrupts: TinyGPU exposes no MSI path. Poll fences.
-- **Check:** SDMA copies a buffer host → VRAM → host intact. Bandwidth is
-  logged in `docs/LOG.md`.
+- **Polaris will not take engine microcode from the host.**
+  - Writes to `SDMA0_UCODE_DATA` are ignored: after a direct load, the RAM
+    still holds its power-on contents.
+  - The SMC loads the images instead. The SMU checks the 20-byte digest at the
+    end of each image and does not store it.
+- **No GART is needed for the SMU.** The VBIOS leaves the memory controller in
+  physical addressing mode. The TOC and images sit in VRAM and the SMU reads
+  them by MC address, so loading firmware needs no host DMA.
+- **The load unhalts the RLC and MEC.** Their TOC entries carry the "unhalt"
+  flag, so they are running, with no queues, from `smc-load` on.
+- **amdgpu's SDMA fill packet fills bytes.** `FILLSIZE` = 0 repeats the
+  value's low byte, and amdgpu only fills with zero. rawgpu sets `FILLSIZE` = 2.
+- **Mac sleep resets the card.** The device node and TinyGPU binding survive,
+  so nothing reports it. Run `post` and `smc-load` after any sleep, and keep
+  the Mac awake while a job uses the card.
 
 Recovery notes:
 
@@ -88,13 +94,26 @@ Recovery notes:
   (write `0x39d5e86b` to config `0x7c`) also has no effect through DriverKit.
 - A GMC soft reset cleared a stuck MC busy bit. Shortly afterwards the card
   stopped answering config reads, and only a power cycle recovers that.
+- Power-cycling the enclosure while TinyGPU holds a wedged card left the old
+  device stuck mid-teardown. Unplugging the cable then froze the Mac, and only
+  a restart cleared it. Prefer restarting the Mac with the enclosure on.
 
-## Stage 4: first dispatch
+## Stage 4: compute queue and first dispatch
 
+The reference is `gfx_v8_0.c`.
+
+- **RLC:** `gfx_v8_0_rlc_resume()` stops, resets and restarts the RLC that the
+  SMU left running. Leave clock and power gating off.
+- **MEC:** one compute queue on ME1 pipe 0. Build its MQD as
+  `gfx_v8_0_mqd_init()` does, then write the HQD registers directly as
+  `gfx_v8_0_mqd_commit()` does, with no KIQ. The ring and its write pointer
+  live in host memory or VRAM.
+- No interrupts: TinyGPU exposes no MSI path. Poll fences (`RELEASE_MEM`).
+- **Check 1:** a PM4 `WRITE_DATA` on the compute queue lands in memory.
 - Compile a kernel for `gfx803`. Homebrew LLVM has the target:
   `clang -target amdgcn-amd-amdhsa -mcpu=gfx803`.
 - Load it into VRAM and submit `DISPATCH_DIRECT` through PM4 on the compute queue.
-- **Check:** a vector add matches the CPU result.
+- **Check 2:** a vector add matches the CPU result.
 
 ## Stage 5: workloads
 

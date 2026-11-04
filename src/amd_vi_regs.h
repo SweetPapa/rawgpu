@@ -113,6 +113,12 @@
 #define CG_CLKPIN_CNTL_2__XO_IN_OSCIN_EN_MASK                0x4000
 #define CG_CLKPIN_CNTL_2__XO_IN_OSCIN_EN__SHIFT              0xe
 
+#define ixCG_MULT_THERMAL_STATUS                             0xc0300014  /* smu/smu_7_1_3 */
+#define CG_MULT_THERMAL_STATUS__ASIC_MAX_TEMP_MASK           0x1ff
+#define CG_MULT_THERMAL_STATUS__ASIC_MAX_TEMP__SHIFT         0x0
+#define CG_MULT_THERMAL_STATUS__CTF_TEMP_MASK                0x3fe00
+#define CG_MULT_THERMAL_STATUS__CTF_TEMP__SHIFT              0x9
+
 #define ixCG_SPLL_FUNC_CNTL                                  0xc0500140  /* smu/smu_7_1_3 */
 #define CG_SPLL_FUNC_CNTL__SPLL_BYPASS_EN_MASK               0x8
 #define CG_SPLL_FUNC_CNTL__SPLL_BYPASS_EN__SHIFT             0x3
@@ -2832,7 +2838,6 @@
 #define SMU_SMC_IND_INDEX__SMC_IND_ADDR_MASK                 0xffffffff
 #define SMU_SMC_IND_INDEX__SMC_IND_ADDR__SHIFT               0x0
 
-#define ixSMU_STATUS                                         0xe0003088  /* smu/smu_7_1_3 */
 #define ixSMU_STATUS                                         0xe0003088  /* smu/smu_7_1_3 */
 #define SMU_STATUS__SMU_DONE_MASK                            0x1
 #define SMU_STATUS__SMU_DONE__SHIFT                          0x0

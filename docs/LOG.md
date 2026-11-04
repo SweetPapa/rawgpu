@@ -2,6 +2,91 @@
 
 Dated, factual notes from real hardware. Newest first.
 
+## 2026-11-04: stage 3, SMC firmware loaded, SDMA moves data
+
+Same host, enclosure and card. After the restart (below) the card was cold, and
+`rawgpu post` posted it as in stage 2.
+
+**Sleep resets the card.** About 20 minutes after posting, with nothing using
+the card, `CONFIG_MEMSIZE`, `MC_VM_FB_LOCATION` and all 16 BIOS scratch
+registers read 0. That is a full ASIC reset. The Mac had gone to sleep.
+
+- The `display@0` IOPCIDevice (same registry ID), TinyGPU's binding and our
+  TinyGPU server process all survived.
+- Config space was restored, and PCI/PCIe/AER showed no errors.
+
+Nothing on the Mac side reports the reset. Run `post` and `smc-load` again
+after any sleep.
+
+**`rawgpu smc-load`**, which ports `polaris10_start_smu()` and
+`smu7_request_smu_load_fw()`:
+
+```
+temperature:  25 C
+SMC firmware: polaris10_k2_smc.bin v0x170400, 129972 bytes; SMU in protected mode, hard key
+  uploaded 129972 bytes to SMC RAM at 0x20000; start and end read back intact
+  boot ROM: Test message answered 0x1; SMU_STATUS 0x00000003 (signature accepted)
+  firmware up after 0.08 s: PC 0x0002021c, FIRMWARE_FLAGS 0x00000001
+microcode:    9 TOC entries; images at VRAM +26 MB (368 KB), TOC at +24 MB, SMU buffer at +25 MB
+LoadUcodes:   answered 0x1; UcodeLoadStatus 0x000005fe after 2 ms: SDMA0 SDMA1 CE PFP ME MEC MEC_JT1 MEC_JT2 RLC
+```
+
+- The TOC, the images and the SMU's 800 KB work buffer are all in VRAM.
+  amdgpu puts its firmware buffer in GTT on bare metal, and in VRAM only with
+  `debug_use_vram_fw_buf` or SR-IOV.
+- The VBIOS leaves `MC_VM_MX_L1_TLB_CNTL.SYSTEM_ACCESS_MODE` = 0 (physical
+  addressing). The SMU therefore read VRAM by MC address with no GART set up,
+  and nothing touched host memory.
+- **The SDMA microcode RAM now holds the image.** The readback matched 3104 of
+  3109 dwords on both engines.
+  - The 5 that differ are the last 20 bytes of each file
+    (`SMU_DIGEST_SIZE_BYTES`). They are high-entropy in the file, and the RAM
+    reads `0x00f00449` there, the value of the last code dword.
+  - So the SMU checks the digest and does not store it. rawgpu now compares the
+    3104 code dwords.
+- The SMU left `SDMA0/1_UCODE_ADDR` = `0x3a`: the firmware version (58), the
+  same value amdgpu's direct load writes there.
+- **Side effects of the load:**
+  - The TOC marks RLC and MEC "unhalt". Afterwards `RLC_CNTL` went from 0 to 1,
+    and `CP_MEC_CNTL` from `0x50000000` (both MEs halted) to 0.
+  - `SMU_FIRMWARE` went from `0x00030006` to `0x0003001e`: the SRAM read and
+    write block bits are set. Reading the soft registers still works.
+- A second `smc-load` sees the firmware running and the images loaded, and only
+  re-verifies.
+
+**`rawgpu sdma-test`: all six phases pass.**
+
+- Phases: VRAM write, VRAM copy, host write, host read, round trip and fill.
+- Every round trip was checked word for word, plus 64 VRAM spot checks through
+  `MM_INDEX`.
+
+| Run | host → VRAM | VRAM → host | VRAM → VRAM | fill → host |
+|---|---|---|---|---|
+| SDMA0, ring in VRAM, 64 MB | 2.77 GB/s | 3.06 GB/s | 6.71 GB/s | 3.06 GB/s |
+| SDMA1, ring in VRAM, 64 MB | 2.78 GB/s | 3.06 GB/s | 7.33 GB/s | 3.06 GB/s |
+| SDMA0, ring in VRAM, 127 MB | 2.78 GB/s | 3.06 GB/s | 6.73 GB/s | 3.06 GB/s |
+| SDMA0, ring in host memory, 64 MB | 2.88 GB/s | 3.18 GB/s | 7.28 GB/s | 3.18 GB/s |
+
+- Each figure is the best of 3, and includes submission and fence polling over
+  the socket.
+- The PCIe link is Gen3 x4 (3.94 GB/s raw).
+- VRAM → VRAM ran at the VBIOS boot clocks (memory 400 MHz), so it says
+  nothing about the card's real memory bandwidth.
+- The host-ring runs poll their fence in local memory. Polling a VRAM ring's
+  fence costs an HDP invalidate and a BAR0 read per poll.
+- After every run: no PCI/PCIe/AER errors, no VM faults, both engines halted,
+  `SRBM_STATUS` idle. Temperature peaked at 30 C.
+
+**Fill packet.** amdgpu's `sdma_v3_0_emit_fill_buffer()` leaves the header's
+`FILLSIZE` at 0. With that, a fill of `0xA5A55A5A` wrote `0x5a5a5a5a` across
+all 16 MB: it fills with the value's low byte. amdgpu only ever fills with
+zero, so it never sees this. `FILLSIZE` = 2 fills whole dwords; rawgpu now
+sets it.
+
+**Limits found:** source, destination and control pages share the 256 MB
+GART, so a test buffer is at most 127 MB. `sdma-test 256` now refuses
+cleanly.
+
 ## 2026-11-04: stage 3, first SDMA attempts (not working yet)
 
 **Firmware.** `tools/fetch-firmware.sh` pulls linux-firmware
@@ -69,6 +154,24 @@ file:     00000000 c819007c 00000000 1d940010 994008f4 00000000 840007ad 0000000
   - After that the card answered config reads with all-ones, and TinyGPU's
     reset did not bring it back.
   - **Needs a power cycle.**
+
+**After the power cycle,** macOS never re-enumerated the card:
+
+- The old `display@0` IOPCIDevice, and its HDMI-audio sibling, sat at
+  *inactive, busy 1* for over 7 minutes. TinyGPU's per-device `IOUserServer`
+  for the old instance stayed active.
+- The Thunderbolt port above them stayed busy, so the new enclosure never
+  showed up.
+- `ps`, `pgrep -f` and `system_profiler` hung on the stuck teardown. Only
+  `ioreg` still answered.
+- Killing rawgpu's TinyGPU server did not release it.
+
+The enclosure's Thunderbolt cable was then unplugged and replugged, and the
+Mac froze and was restarted. After the restart the card enumerated normally and
+TinyGPU bound it.
+
+Lesson: power-cycling the enclosure while the dext holds a wedged card can
+leave the teardown stuck, and only a restart of the Mac cleared it.
 
 ## 2026-11-04: stage 2, card posted from userspace
 

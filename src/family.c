@@ -49,7 +49,7 @@ static const char *support_note(rg_gen g, uint32_t flags) {
   if (flags & RG_AMD_APU) return "integrated GPU (APU), not a PCIe card: out of scope";
   switch (g) {
   case RG_GEN_AMD_VI:
-    return "rawgpu amd-vi backend: probe + VBIOS today; bring-up targets Polaris first";
+    return "rawgpu amd-vi backend: post, SMC firmware and SDMA DMA work on Polaris 10; compute is next";
   case RG_GEN_AMD_SI:
   case RG_GEN_AMD_CIK:
     return "no backend yet; closest relative of amd-vi (GCN, ATOM BIOS, SMC firmware)";

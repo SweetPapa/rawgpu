@@ -2,11 +2,11 @@
  *
  * Bring-up follows Linux amdgpu's sdma_v3_0_gfx_resume().
  *
- * Microcode: vi_sdma_load_ucode() is amdgpu's old direct load
- * (sdma_v3_0_load_microcode(), Linux <= 4.14). Polaris ignores it: after a
- * direct load the microcode RAM still reads back its power-on contents
- * (docs/LOG.md, 2026-11-04). On Polaris the SMC has to load the image, which
- * rawgpu does not do yet, so sdma-test cannot pass there until it does.
+ * Microcode: the SMC loads it (`rawgpu smc-load`, amd_vi_smu.c), as amdgpu
+ * does for every VI chip. Polaris ignores microcode the host writes through
+ * SDMA0_UCODE_DATA (docs/LOG.md, 2026-11-04). An engine that runs whatever its
+ * RAM held at power-on can wedge the memory controller, so sdma-test reads the
+ * microcode RAM back and refuses to unhalt an engine that does not hold the image.
  *
  * The ring and the writeback block (read pointer, fence, test slot) can live
  * in VRAM, written through BAR0, or in host DMA memory reached through the
@@ -27,6 +27,7 @@
 #define SDMA_SUBOP_COPY_LINEAR 0
 #define SDMA_SUBOP_WRITE_LINEAR 0
 #define SDMA_PKT_HEADER(op, sub) (((op) & 0xFFu) | ((sub) & 0xFFu) << 8)
+#define SDMA_FILLSIZE_DW (2u << 30) /* SDMA_PKT_CONSTANT_FILL_HEADER_FILLSIZE(2) */
 
 #define SDMA1_OFFSET 0x200u          /* SDMA1_REGISTER_OFFSET */
 #define SDMA_COPY_MAX 0x3fffe0u      /* sdma_v3_0_buffer_funcs.copy_max_bytes */
@@ -97,12 +98,22 @@ int vi_sdma_soft_reset(vi_dev *v) {
   return v->err;
 }
 
-int vi_sdma_load_ucode(vi_dev *v, int me, const amd_fw *fw) {
+/* The read side of sdma_v3_0_load_microcode()'s UCODE_ADDR/UCODE_DATA port:
+ * the data port auto-increments, so set the address once and stream. */
+int vi_sdma_check_ucode(vi_dev *v, int me, const amd_fw *fw, uint32_t *first_bad) {
   uint32_t o = eng(me);
+  if (!REG_GET_FIELD(vi_rreg(v, mmSDMA0_F32_CNTL + o), SDMA0_F32_CNTL, HALT)) {
+    if (!v->err) fprintf(stderr, "rawgpu: SDMA%d is running; not reading its microcode RAM\n", me);
+    return v->err ? v->err : -EBUSY;
+  }
+  if (fw->ucode_dw <= VI_SMU_DIGEST_DW) return -EINVAL;
+  uint32_t saved = vi_rreg(v, mmSDMA0_UCODE_ADDR + o);
   vi_wreg(v, mmSDMA0_UCODE_ADDR + o, 0);
-  for (uint32_t i = 0; i < fw->ucode_dw; i++) vi_wreg(v, mmSDMA0_UCODE_DATA + o, fw->ucode[i]);
-  vi_wreg(v, mmSDMA0_UCODE_ADDR + o, fw->ucode_version);
-  return v->err;
+  int bad = 0;
+  for (uint32_t i = 0; i < fw->ucode_dw - VI_SMU_DIGEST_DW && !v->err; i++)
+    if (vi_rreg(v, mmSDMA0_UCODE_DATA + o) != fw->ucode[i] && !bad++) *first_bad = i;
+  vi_wreg(v, mmSDMA0_UCODE_ADDR + o, saved);
+  return v->err ? v->err : bad;
 }
 
 int vi_sdma_start(vi_sdma *s, vi_dev *v, int me, vi_mem ring, uint32_t ring_bytes, vi_mem wb) {
@@ -281,7 +292,9 @@ uint32_t vi_sdma_fill(vi_sdma *s, uint64_t dst, uint32_t value, uint64_t bytes) 
   while (bytes) {
     uint32_t n = bytes > SDMA_COPY_MAX ? SDMA_CHUNK : (uint32_t)bytes;
     if (ring_reserve(s, 5 + 5)) return 0;
-    ring_put(s, SDMA_PKT_HEADER(SDMA_OP_CONST_FILL, 0)); /* sdma_v3_0_emit_fill_buffer() */
+    /* sdma_v3_0_emit_fill_buffer(), plus FILLSIZE = 2: upstream leaves it 0, which
+     * fills with the value's low byte (it only ever fills with zero) */
+    ring_put(s, SDMA_PKT_HEADER(SDMA_OP_CONST_FILL, 0) | SDMA_FILLSIZE_DW);
     ring_put(s, (uint32_t)dst);
     ring_put(s, (uint32_t)(dst >> 32));
     ring_put(s, value);
@@ -378,10 +391,17 @@ int vi_cmd_sdma_test(rg_dev *d, const rg_ident *id, int argc, char **argv) {
     else if (!strcmp(argv[i], "--host-ring")) host_ring = true;
     else if (!strcmp(argv[i], "--vram-only")) vram_only = true;
     else if (!strcmp(argv[i], "--engine") && i + 1 < argc) me = atoi(argv[++i]) & 1;
-    else if (argv[i][0] >= '1' && argv[i][0] <= '9') mb = strtoull(argv[i], NULL, 10);
+    else if (argv[i][0] >= '1' && argv[i][0] <= '9') {
+      char *end;
+      mb = strtoull(argv[i], &end, 10);
+      if (*end) return -EINVAL;
+    }
     else return -EINVAL;
   }
-  if (mb > 1024) { fprintf(stderr, "rawgpu: at most 1024 MB per buffer\n"); return -EINVAL; }
+  if (mb > 127) { /* src + dst + 1 MB of control pages share the 256 MB GART */
+    fprintf(stderr, "rawgpu: at most 127 MB per buffer: source and destination share the 256 MB GART\n");
+    return -EINVAL;
+  }
   if (!id->chip || strcmp(id->chip, "POLARIS10")) {
     fprintf(stderr, "rawgpu: sdma-test is only wired up for POLARIS10 so far (this is %s): the golden\n"
                     "        register tables and firmware names differ per chip.\n", id->chip ? id->chip : "unknown");
@@ -446,7 +466,16 @@ int vi_cmd_sdma_test(rg_dev *d, const rg_ident *id, int argc, char **argv) {
   vi_program_sequence(&v, golden_polaris10, sizeof golden_polaris10 / sizeof golden_polaris10[0]);
   vi_sdma_stop(&v, 0);
   vi_sdma_stop(&v, 1);
-  if ((r = vi_sdma_load_ucode(&v, me, &fw))) goto out;
+  uint32_t first_bad = 0;
+  int bad_ucode = vi_sdma_check_ucode(&v, me, &fw, &first_bad);
+  if (bad_ucode) {
+    if (bad_ucode > 0)
+      fprintf(stderr, "rawgpu: SDMA%d microcode RAM does not hold %s.bin (%d of %u dwords differ, first at %u).\n"
+                      "        Run `rawgpu smc-load` first; the engine stays halted.\n", me, fw.name, bad_ucode,
+              fw.ucode_dw - VI_SMU_DIGEST_DW, first_bad);
+    r = bad_ucode > 0 ? -EIO : bad_ucode;
+    goto out;
+  }
 
   /* VRAM scratch for the VRAM-side tests, inside BAR0 */
   const uint64_t V_RING = VI_VRAM_FREE, V_WB = V_RING + 0x10000, V_A = 64ull << 20, V_B = 128ull << 20;
@@ -455,7 +484,8 @@ int vi_cmd_sdma_test(rg_dev *d, const rg_ident *id, int argc, char **argv) {
   vi_mem wb = host_ring ? (vi_mem){.cpu = (uint8_t *)ctrl.cpu + 0x10000, .gpu = ctrl_gpu + 0x10000}
                         : (vi_mem){.bar = V_WB, .gpu = g.vram_start + V_WB};
   if ((r = vi_sdma_start(&s, &v, me, ring, 64u << 10, wb))) goto out;
-  printf("SDMA%d:        microcode loaded, ring of 64 KB in %s\n", me, host_ring ? "host memory (GART)" : "VRAM");
+  printf("SDMA%d:        microcode RAM matches %s.bin; ring of 64 KB in %s\n", me, fw.name,
+         host_ring ? "host memory (GART)" : "VRAM");
 
   /* 1: the engine runs packets and writes VRAM */
   if ((r = vi_sdma_ring_test(&s, g.vram_start + V_WB + WB_TEST, NULL, (int64_t)(V_WB + WB_TEST)))) {
@@ -515,9 +545,13 @@ int vi_cmd_sdma_test(rg_dev *d, const rg_ident *id, int argc, char **argv) {
   PHASE("round trip:   %llu MB host -> VRAM -> VRAM -> host: %s; VRAM spot check via MM_INDEX: %s",
         (unsigned long long)mb, bad ? "MISMATCH" : "intact", spot_bad ? "MISMATCH" : "64/64 OK");
   if ((r = timed(&s, "fill", true, dst_gpu, 0xA5A55A5Au, bytes, 1, &t_fill))) { vi_sdma_dump(&s); goto out; }
-  size_t fill_bad = 0;
-  for (size_t i = 0; i < n; i++) fill_bad += dp[i] != 0xA5A55A5Au;
+  size_t fill_bad = 0, first = 0;
+  for (size_t i = 0; i < n; i++)
+    if (dp[i] != 0xA5A55A5Au && !fill_bad++) first = i;
   PHASE("fill:         %llu MB constant fill of host memory: %s", (unsigned long long)mb, fill_bad ? "MISMATCH" : "intact");
+  if (fill_bad)
+    printf("              %zu of %zu dwords wrong; dword %zu reads 0x%08x, last dword 0x%08x\n", fill_bad, n, first,
+           dp[first], dp[n - 1]);
 
   printf("bandwidth (best of %d x %llu MB, SDMA%d, boot clocks):\n", reps, (unsigned long long)mb, me);
   printf("  host -> VRAM   %6.2f GB/s\n", gbps(bytes, t_up));
