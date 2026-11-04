@@ -2,6 +2,82 @@
 
 Dated, factual notes from real hardware. Newest first.
 
+## 2026-11-04: stage 2, card posted from userspace
+
+Same host, enclosure and card as stage 1. The card was cold and had never been
+posted since power-on.
+
+`rawgpu atom-info`:
+
+- amdgpu's `amdgpu_atom_parse()` accepts the VBIOS. Its own banner reads
+  `113-C94441_100, build: 441714, ver: 015.050.003.000.000000, 2019/01/17`.
+- 61 of 81 command tables are present. `ASIC_Init` is at 0xad30 (149 bytes, v1.2).
+- `FirmwareInfo` boot clocks, passed to ASIC_Init: engine 300 MHz, memory 400 MHz.
+- `VRAM_UsageByFirmware` = 0 KB, so the ATOM FB scratch falls back to amdgpu's
+  20 KB default.
+
+`rawgpu post --trace local/post-001.trace --trace-ops`:
+
+```
+ASIC_Init returned OK (0): 0.68 s, 12242 reads, 2174 writes, 0 indirect, 3525 delays (349.2 ms requested)
+posted:            yes (CONFIG_MEMSIZE = 8192 MB)
+  MC_VM_FB_LOCATION          0xf5fff400   VRAM at MC 0xf400000000-0xf5ffffffff
+  MC_VM_FB_OFFSET            0x00000000
+  MC_SHARED_CHMAP            0x00433210
+  MC_ARB_RAMCFG              0x000060a2
+  MC_SEQ_MISC0               0x50601ff2   memory type field (MT) = 5
+  MC_SEQ_SUP_CNTL            0xe9800001
+  MC_SEQ_TRAIN_WAKEUP_CNTL   0xc00000e0
+  HDP_NONSURFACE_BASE        0xf4000000
+  HDP_NONSURFACE_INFO        0x00020080
+  HDP_NONSURFACE_SIZE        0x7ffffbff
+  BIF_FB_EN                  0x00000003   host access to VRAM: read on, write on
+```
+
+- The interpreter printed no "not implemented" or "unknown opcode" messages,
+  and no register fell outside the BAR (0 indirect).
+- The VBIOS left HDP pointed at the FB base (`0xf4000000 << 8` =
+  `0xf400000000`) and host FB access enabled. `--enable-fb` was not needed.
+- MT = 5 matches the "GDDR5" in the VBIOS name.
+- Sub-tables called, counted from the opcode trace:
+
+  | Table | Calls |
+  |---|---|
+  | ProcessI2cChannelTransaction | 35 |
+  | AdjustMemoryController | 27 |
+  | GetSCLKOverMCLKRatio | 18 |
+  | SetUniphyInstance | 18 |
+  | VRAM_GetCurrentInfoBlock | 16 |
+  | DynamicMemorySettings | 16 |
+  | MC_Synchronization | 14 |
+  | GetVoltageInfo | 11 |
+  | SetVoltage | 7 |
+  | MC_SEQ_Control | 5 |
+  | MemoryPLLInit | 3 |
+  | MemoryTraining | 3 |
+  | VRAM_BlockDetectionByStrap | 2 |
+  | SetMemoryClock | 2 |
+
+  This is real voltage-regulator programming over I2C and real memory training.
+
+`rawgpu vram-test`:
+
+```
+  VRAM +   1 MB: OK
+  VRAM +  64 MB: OK
+  VRAM + 192 MB: OK
+  through BAR0 (CPU MMIO over the socket, not DMA): write 17.8 MB/s, read 1.8 MB/s
+  VRAM + 1024 MB (MM_INDEX): OK
+  VRAM + 4096 MB (MM_INDEX): OK
+  VRAM + 8191 MB (MM_INDEX): OK
+  VRAM +    1 MB (MM_INDEX, re-reading the BAR-written region): OK
+```
+
+- The BAR regions are each written before any is read back, which catches
+  address aliasing.
+- The MM_INDEX re-read of the BAR region proves BAR0 offset 0 = VRAM offset 0.
+- A second `rawgpu post` is a no-op ("already posted").
+
 ## 2026-11-04: stage 1 on a PowerColor RX 590
 
 **Host:** MacBook Pro (Mac16,7, M4 Pro, 24 GB), macOS 15.5, SIP on.

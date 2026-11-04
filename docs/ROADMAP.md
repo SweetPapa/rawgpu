@@ -10,32 +10,32 @@ Each stage has a check that proves it is done.
 - Config space, BAR mapping, register reads, VBIOS read, DMA buffer mapping.
 - **Check:** `rawgpu probe` prints the ATOM header, and `rawgpu dma-test` gets bus addresses.
 
-## Stage 2: post the card
+## Stage 2: post the card ✅ (2026-11-04)
 
-Nothing on a Mac runs the card's VBIOS init, so the memory controller is
-untrained and `CONFIG_MEMSIZE` reads 0.
+Nothing on a Mac runs the card's VBIOS init, so a cold card has an untrained
+memory controller and `CONFIG_MEMSIZE` reads 0.
 
-- Port the ATOM interpreter from Linux `drivers/gpu/drm/amd/amdgpu/atom.c`
-  (MIT; ~1,600 lines of portable C) onto `rg_dev` register access. It needs
-  `reg_read/write`, `mc_read/write` and `pll_read/write` callbacks, plus a
-  scratch area.
-- Run `ASIC_Init` (master command table index 0) with the default engine and
-  memory clocks from the `FirmwareInfo` data table. This is what
-  `amdgpu_atom_asic_init()` does on an unposted card.
-- I/O space is not needed. amdgpu's interpreter does all register traffic
-  through MMIO and has no I/O-port path at all, which is why ARM hosts can post
-  AMD cards.
-- **Check:** `CONFIG_MEMSIZE` reads 8192. A pattern written through BAR0 (the
-  256 MB VRAM window) reads back.
+- Linux amdgpu's ATOM interpreter (`atom.c`) is vendored **unmodified** and
+  compiled against kernel shims; see `src/atom/UPSTREAM.md`.
+- `rawgpu post` runs `ASIC_Init` with the VBIOS boot clocks, as
+  `amdgpu_atom_asic_init()` does. On the RX 590 it took 0.68 s, with
+  12,242 register reads, 2,174 writes and 3,525 delays.
+- I/O space was not needed. amdgpu's interpreter does all register traffic
+  through MMIO.
+- **Check, passed:**
+  - `CONFIG_MEMSIZE` = 8192 MB.
+  - `rawgpu vram-test` patterns 3 × 64 KB through BAR0. It also checks 1 GB,
+    4 GB and 8 GB − 1 MB through `MM_INDEX`, and re-reads the BAR-written
+    region the same way. All intact.
 
-Things to watch:
+What we learned:
 
-- Interpreter speed. Each register read is a ~10 µs socket round trip, while
-  writes are pipelined. ASIC_Init should still finish in well under a second.
-  If not, add a "batch of register ops" command to a fork of the TinyGPU
-  server, or run the interpreter inside it.
-- Unaligned access. Apple Silicon faults on unaligned device-memory access.
-  The TinyGPU server already uses aligned 32-bit copies; keep it that way.
+- **Host access to VRAM is slow.** BAR0 runs at about 18 MB/s write and
+  1.8 MB/s read, because every read is a PCIe round trip through the socket
+  server. Bulk data must move by DMA (SDMA, stage 3), never through the BAR.
+- **Posting should not survive a power cycle.** Memory training lives in the
+  card, so this is expected but not yet tested. Run `rawgpu post` after every
+  power-on; it is a no-op on an already-posted card.
 
 ## Stage 3: firmware, memory, queues
 

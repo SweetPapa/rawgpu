@@ -14,7 +14,12 @@ static const char *usage =
   "  cfg              hex-dump PCI config space\n"
   "  vbios -o FILE    save the VBIOS image (writes the ROM index register, as amdgpu does)\n"
   "  bench [N]        round-trip latency of config and register reads\n"
-  "  dma-test [KB]    allocate a DMA buffer and print its bus addresses (no GPU activity)\n";
+  "  dma-test [KB]    allocate a DMA buffer and print its bus addresses (no GPU activity)\n"
+  "  atom-info        list the VBIOS command tables and ASIC_Init parameters (no writes)\n"
+  "  post [--trace FILE] [--trace-ops] [--force]\n"
+  "                   WRITES: run the VBIOS ASIC_Init so the card's memory works\n"
+  "  vram-test [--enable-fb]\n"
+  "                   WRITES VRAM: pattern test through BAR0 (needs a posted card)\n";
 
 static double now_us(void) {
   struct timespec t;
@@ -134,7 +139,24 @@ int main(int argc, char **argv) {
     else { fputs(usage, stderr); r = -EINVAL; }
   } else if (!strcmp(cmd, "bench")) r = cmd_bench(&d, &id, i < argc ? atoi(argv[i]) : 2000);
   else if (!strcmp(cmd, "dma-test")) r = cmd_dma_test(&d, i < argc ? (size_t)atoi(argv[i]) : 1024);
-  else { fputs(usage, stderr); r = -EINVAL; }
+  else if (!strcmp(cmd, "atom-info") || !strcmp(cmd, "post") || !strcmp(cmd, "vram-test")) {
+    const rg_backend *b = id.backend;
+    if (!b || !b->atom_info) { fprintf(stderr, "rawgpu: no ATOM support for this family\n"); r = -ENOTSUP; }
+    else if (!strcmp(cmd, "atom-info")) r = b->atom_info(&d);
+    else if (!strcmp(cmd, "post")) {
+      rg_post_opts o = {0};
+      for (; i < argc; i++) {
+        if (!strcmp(argv[i], "--trace") && i + 1 < argc) o.trace_path = argv[++i];
+        else if (!strcmp(argv[i], "--trace-ops")) o.trace_ops = true;
+        else if (!strcmp(argv[i], "--force")) o.force = true;
+        else { fputs(usage, stderr); r = -EINVAL; break; }
+      }
+      if (!r) r = b->post(&d, &o);
+    } else {
+      bool en = i < argc && !strcmp(argv[i], "--enable-fb");
+      r = b->vram_test(&d, en);
+    }
+  } else { fputs(usage, stderr); r = -EINVAL; }
 
   rg_close(&d);
   return r ? 1 : 0;

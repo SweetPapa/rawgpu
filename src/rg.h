@@ -96,6 +96,12 @@ typedef struct { uint16_t device; const char *chip; uint32_t flags; } rg_amd_id;
 typedef struct rg_backend rg_backend;
 
 typedef struct {
+  const char *trace_path; /* register trace file, or NULL */
+  bool trace_ops;         /* include opcode-level ATOM debug output in the trace */
+  bool force;             /* post even if the card already reports posted */
+} rg_post_opts;
+
+typedef struct {
   rg_gen gen;
   const char *chip;        /* e.g. "POLARIS10", or NULL */
   const char *gen_name;    /* e.g. "AMD GCN3/4 (VI)" */
@@ -110,6 +116,9 @@ struct rg_backend {
   uint32_t safe_reg;                /* a side-effect-free register for latency tests */
   int (*probe)(rg_dev *, const rg_ident *);  /* read-only status report to stdout */
   int (*vbios_read)(rg_dev *, uint8_t **buf, size_t *len); /* caller frees *buf */
+  int (*atom_info)(rg_dev *);                     /* parse the VBIOS tables; no hardware writes */
+  int (*post)(rg_dev *, const rg_post_opts *);    /* run the VBIOS init: writes registers */
+  int (*vram_test)(rg_dev *, bool enable_fb);     /* pattern test through the VRAM BAR */
 };
 
 void rg_identify_family(const rg_dev *d, rg_ident *out);
