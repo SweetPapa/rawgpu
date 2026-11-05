@@ -76,5 +76,31 @@ The same method as stage 2's ATOM interpreter (`src/atom/UPSTREAM.md`):
   memory traffic under memory DPM.
   - Fix: `rawgpu mc-load` (the driver's MC firmware, which amdgpu loads before
     DPM) and no MC reprogramming under a live GART. See docs/LOG.md.
-- Next, after a power cycle: `post`, `mc-load`, `smc-load`, then
-  `dpm-enable --no-mclk` (engine DPM alone) and a benchmark, then memory DPM.
+- Attempts 2-4 (each after an unplug and power cycle): the card still died
+  on host writes into VRAM, whatever was turned off (memory DPM, deep sleep,
+  ULV). The common factor was AVFS off.
+- Attempt 5: amdgpu's own `polaris10_start_smu()` with AVFS. Host access to
+  VRAM works, and SDMA works. Shader stores to host memory hung.
+- Attempt 6: RLC safe mode as amdgpu uses it, and GFX brought up once.
+  **Everything works at rated clocks: 1540 MHz engine (measured on the GPU),
+  2000 MHz memory, 6972 GFLOPS, 172 GB/s.** See docs/LOG.md.
+
+## The recipe, from power-on
+
+```
+rawgpu post          # VBIOS ASIC_Init
+rawgpu mc-load       # the driver's MC firmware (gmc_v8_0_polaris_mc_load_microcode)
+rawgpu dpm-enable    # amdgpu's start_smu (SMC firmware, AVFS, microcode), hwmgr_hw_init, then GFX
+```
+
+After that, any number of `sdma-test`, `compute-test` or `bench-compute`
+runs. A Mac sleep resets the card, and then the recipe starts again.
+`rawgpu smc-load` remains the way to run without DPM, at the boot clocks.
+
+## Where rawgpu still differs from amdgpu
+
+- PCIe DPM is off: the link is a Thunderbolt tunnel, and retraining it is not
+  worth the risk.
+- No display is configured, and the DCE is not set up.
+- No interrupts. IRQ registration is a no-op; the SMC's own thermal
+  protection still acts.

@@ -9,9 +9,10 @@ Apple-signed DriverKit extension that hands raw PCIe access (config space, BAR
 MMIO, DMA buffers) to userspace. On top of that, rawgpu is a small C codebase
 that identifies the card and, family by family, brings it up.
 
-**Status:** stages 1–4 of 5 done: the card runs compiled compute kernels.
-Stage 5 (clocks, a host API, real workloads) is next. The first card is a
-PowerColor RX 590 (Polaris 30).
+**Status:** stages 1–4 of 5 done, and stage 5 has its clocks. The card runs
+compiled compute kernels at its rated clocks under amdgpu's own power
+management. Next: kernel features and a library for real workloads. The
+first card is a PowerColor RX 590 (Polaris 30).
 
 - **Posting works.** rawgpu posts the card from userspace: Linux amdgpu's own
   ATOM interpreter, unmodified, runs the VBIOS `ASIC_Init`. That brings up the
@@ -32,7 +33,12 @@ PowerColor RX 590 (Polaris 30).
   - At the 300 MHz boot engine clock the card does 1.36 TFLOPS of FP32
     multiply-add, 99% of what 36 CUs allow at that clock, and copies VRAM at
     35 GB/s.
-  - Raising the clocks (SMU DPM) is next.
+- **Rated clocks.** amdgpu's Polaris power-management code runs unmodified
+  inside rawgpu (`src/pp/`).
+  - The SMC manages clocks, voltages, fan and power limits.
+  - Measured on the GPU: engine 1540 MHz, memory 2000 MHz.
+  - FP32 multiply-add: 6.97 TFLOPS. VRAM copy: 172 GB/s. About 5x the
+    boot clocks.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) and [docs/LOG.md](docs/LOG.md).
 
@@ -45,8 +51,8 @@ make
 ./build/rawgpu probe
 ./build/rawgpu post           # after each power-on of the card, and after the Mac sleeps
 ./build/rawgpu vram-test
-./build/rawgpu mc-load        # the driver's MC firmware, as amdgpu loads it (before smc-load)
-./build/rawgpu smc-load       # SMC firmware + engine microcode, once per post
+./build/rawgpu mc-load        # the driver's MC firmware, as amdgpu loads it
+./build/rawgpu dpm-enable     # SMC firmware + microcode + power management (or `smc-load` for boot clocks)
 ./build/rawgpu sdma-test      # DMA host <-> VRAM, with bandwidth
 make kernels                  # needs Homebrew llvm (brew install llvm)
 ./build/rawgpu compute-test   # compute queue, PM4 writes, then the vadd kernel
@@ -55,8 +61,8 @@ make kernels                  # needs Homebrew llvm (brew install llvm)
 
 **Keep the Mac awake while the card holds state.** Sleep resets the card (the
 memory controller comes back untrained), and macOS does not report it. Use
-`caffeinate -i` around long jobs. After a sleep, run `post` and `smc-load`
-again.
+`caffeinate -i` around long jobs. After a sleep, run `post`, `mc-load` and
+`dpm-enable` again.
 
 Approve the driver at System Settings → General → Login Items & Extensions →
 Driver Extensions → TinyGPU. Check that it bound with
@@ -77,7 +83,8 @@ Driver Extensions → TinyGPU. Check that it bound with
 | `rawgpu cfg [--clear-errors]` | Config space, plus PCI/PCIe/AER error status | Config reads (clearing writes the status bits) |
 | `rawgpu mc-load` | The driver's MC sequencer firmware, as amdgpu loads it before power management; retrains memory | **Writes**: MC sequencer. Run after `post`, before `smc-load` |
 | `rawgpu dpm-info` | The PowerPlay table and EVV voltages, parsed by amdgpu's own powerplay code | VBIOS GetVoltageInfo only; no clock or SMC writes |
-| `rawgpu dpm-enable [--no-mclk] [--level L]` | amdgpu's `hwmgr_hw_init()`: DPM, voltage control, fan and power limits in the SMC | **Writes**: SMC tables and clocks/voltages. Experimental; see docs/DPM.md |
+| `rawgpu dpm-enable [--level L]` | On a fresh card: amdgpu's SMC start (with AVFS), then `hwmgr_hw_init()` (DPM, voltages, fan, power limits), then GFX bring-up | **Writes**: SMC firmware and tables, clocks and voltages. After `post` and `mc-load`; see docs/DPM.md |
+| `rawgpu waves`, `rawgpu didt [off]`, `rawgpu gfx-reset` | Diagnostics: live shader waves (PC, status), di/dt limiter state, amdgpu's GFX soft reset | `waves` and `didt` read; `didt off` and `gfx-reset` **write** |
 | `rawgpu smc-load [--force]` | Starts the SMC firmware; it loads the SDMA, RLC and CP microcode from VRAM | **Writes**: SMC RAM, 8 MB of reserved VRAM. Lasts until the card loses power |
 | `rawgpu sdma-test [MB] ...` | GART + SDMA bring-up, copy and fill tests with timing (MB ≤ 127) | **Writes**: VM setup, VRAM, host buffers. Needs `smc-load` first |
 | `rawgpu compute-test [--kernel F]` | RLC/MEC bring-up, one compute queue, PM4 writes and fences, then `vadd` on 1M floats | **Writes**: GFX setup, VRAM, host buffers. Needs `smc-load` first |

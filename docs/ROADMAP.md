@@ -141,15 +141,13 @@ Done (2026-11-04):
 
 Next:
 
-- **Clocks (in progress, docs/DPM.md).**
-  - amdgpu's powerplay code now runs unmodified in rawgpu (`src/pp/`).
-    `dpm-info` reads the PowerPlay table: engine 300-1545 MHz, memory up to
-    2000 MHz, EVV voltages 0.75-1.16 V.
-  - The first `dpm-enable` turned DPM on, then the card wedged under memory
-    traffic. The cause looks like the driver's MC firmware, which rawgpu had
-    not loaded; it now does (`mc-load`).
-  - The engine runs at 300 MHz (measured on the GPU) and memory at 400 MHz.
-    The RX 590 is rated for about 1.5 GHz and 2 GHz, about 5x both.
+- **Clocks ✅ (docs/DPM.md).** amdgpu's powerplay code runs unmodified in
+  rawgpu (`src/pp/`). `post`, `mc-load`, `dpm-enable` bring the card up
+  under SMC power management.
+  - The engine runs at 1540 MHz (measured on the GPU), memory at 2000 MHz.
+  - FP32 MAD: 6972 GFLOPS (98% of peak). VRAM copy: 172 GB/s.
+  - Getting there took AVFS (amdgpu's own SMC start), RLC safe mode, and
+    bringing GFX up once.
   - Clocks are raised the way amdgpu does: SMU7 DPM. The VBIOS PowerPlay
     table (`process_pptables_v1_0.c`) gives the clock and voltage levels.
     `polaris10_init_smc_table()` writes them into the SMC's DPM table, then

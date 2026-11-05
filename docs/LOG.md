@@ -2,6 +2,58 @@
 
 Dated, factual notes from real hardware. Newest first.
 
+## 2026-11-04: stage 5, the RX 590 at its rated clocks
+
+Sixth attempt, on a freshly power-cycled card. The Mac stayed up through all
+the power cycles since the morning's restart.
+
+**Sequence:** `post`, `mc-load`, then `dpm-enable`.
+
+- `dpm-enable` started the SMC through amdgpu's `polaris10_start_smu()`,
+  with AVFS (`FEATURE_STATUS` `0x0001e003`).
+- It ran `hwmgr_hw_init()` and entered RLC safe mode around the DIDT
+  programming, as amdgpu does on Polaris 10 (two `RLC_SAFE_MODE` writes in
+  the trace).
+- It then brought GFX up once, as amdgpu's IP order does.
+
+**Checks:**
+
+- `vram-test` passed (BAR writes at 18.7 MB/s).
+- `compute-test` passed every phase, including `vadd` storing into host
+  memory, the step that hung in the fifth attempt.
+
+**`bench-compute`**, every result checked against the CPU:
+
+| | boot clocks (earlier today) | with DPM |
+|---|---|---|
+| engine clock, measured with `s_memtime` | 299.3 MHz | **1540.1 MHz** |
+| copy 256 MB VRAM -> VRAM | 35.4 GB/s | **171.7 GB/s** |
+| FP32 `v_mad_f32` | 1363 GFLOPS | **6972 GFLOPS** |
+| FP32 fused `v_fma_f32` | 343 GFLOPS | 1763 GFLOPS |
+| SGEMM 1024, 16x16 LDS tiles | 175 GFLOPS | 441 GFLOPS |
+
+- MAD reached 97.9% of the 7119 GFLOPS that 36 CUs x 128 FLOPs x 1545 MHz
+  allow.
+- After the run the SMC reported engine level 7 (1545 MHz) and memory level 2
+  (2000 MHz), with VDDC at 1150 mV. Memory clock switching works.
+- The card peaked at 50 C, with no VM faults and no PCIe errors.
+
+`sdma-test 64` at these clocks:
+
+- host -> VRAM 2.83 GB/s and VRAM -> host 3.06 GB/s, unchanged: the
+  Thunderbolt link is the limit.
+- VRAM -> VRAM on one SDMA engine: 20.4 GB/s, up from 6.7 GB/s.
+
+**What it took, compared with amdgpu:**
+
+- **AVFS on.** amdgpu's own SMC start must run, not rawgpu's `smc-load`.
+  Without AVFS, idle VDDC dropped to 750 mV and host access to VRAM died.
+- **RLC safe mode** around powerplay's GFX register programming.
+- **GFX brought up once per power cycle.** No RLC reset in later processes.
+- **The MC is programmed once.** A live GART's MC setup is left alone.
+- **Still different from amdgpu:** PCIe DPM stays off (the Thunderbolt
+  link), and no display is configured.
+
 ## 2026-11-04: stage 5, amdgpu's power management runs; memory DPM wedged the card
 
 Same setup, posted and with `smc-load` done.
