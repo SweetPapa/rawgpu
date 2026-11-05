@@ -1,8 +1,31 @@
 CC ?= clang
 CFLAGS ?= -O2 -g -std=gnu11 -Wall -Wextra -Wno-unused-parameter
-SRC := src/main.c src/transport_tinygpu.c src/pci.c src/family.c src/amd_atom.c src/amd_fw.c \
-       src/amd_vi.c src/amd_vi_gmc.c src/amd_vi_sdma.c src/amd_vi_smu.c src/amd_vi_gfx.c src/amd_kernel.c src/amd_vi_ctx.c src/amd_vi_bench.c src/amd_vi_dpm.c src/rg_ranges.c src/amd_vi_ktest.c
-HDR := src/rg.h src/amd_ids.inc src/atom/rg_atom.h src/amd_fw.h src/amd_vi.h src/amd_vi_regs.h src/amd_vi_regnames.inc src/upstream/vi_structs.h src/amd_kernel.h src/amd_vi_ctx.h src/pp/rg_pp.h src/rg_ranges.h
+# everything but the CLI's main.c goes into the library too
+LIB_SRC := src/transport_tinygpu.c src/pci.c src/family.c src/amd_atom.c src/amd_fw.c \
+       src/amd_vi.c src/amd_vi_gmc.c src/amd_vi_sdma.c src/amd_vi_smu.c src/amd_vi_gfx.c src/amd_kernel.c \
+       src/amd_vi_ctx.c src/amd_vi_bench.c src/amd_vi_dpm.c src/rg_ranges.c src/amd_vi_ktest.c src/rawgpu_lib.c
+SRC := src/main.c $(LIB_SRC)
+HDR := src/rg.h src/amd_ids.inc src/atom/rg_atom.h src/amd_fw.h src/amd_vi.h src/amd_vi_regs.h src/amd_vi_regnames.inc \
+       src/upstream/vi_structs.h src/amd_kernel.h src/amd_vi_ctx.h src/pp/rg_pp.h src/rg_ranges.h include/rawgpu.h
+OBJ_DIR := build/obj
+LIB_OBJ := $(addprefix $(OBJ_DIR)/,$(notdir $(LIB_SRC:.c=.o))) $(OBJ_DIR)/embedded.o
+# where the library finds the kernel compiler and this checkout's device libraries and firmware by default
+LIB_DEFS = -DRAWGPU_DEFAULT_CLANG='"$(AMDGPU_CLANG)"' -DRAWGPU_DEFAULT_LOCAL='"$(CURDIR)/local"'
+
+all: build/rawgpu build/librawgpu.a build/librawgpu.dylib
+
+$(OBJ_DIR)/%.o: src/%.c $(HDR)
+	@mkdir -p $(OBJ_DIR)
+	$(CC) $(CFLAGS) -Iinclude -Isrc $(LIB_DEFS) -c -o $@ $<
+
+# the built-in kernels (rawgpu_sgemm()), compiled to gfx803 and embedded in the library
+build/gen/embedded.c: build/kernels/sgemm.o tools/embed.py
+	@mkdir -p build/gen
+	python3 -I tools/embed.py $@ sgemm=build/kernels/sgemm.o
+
+$(OBJ_DIR)/embedded.o: build/gen/embedded.c
+	@mkdir -p $(OBJ_DIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 # amdgpu's ATOM interpreter, compiled unmodified against the kernel shims.
 # -fno-strict-aliasing and -Wno-pointer-sign match how the kernel builds it.
@@ -29,9 +52,15 @@ build/pp/%.o: %.c $(PP_H)
 	@mkdir -p build/pp
 	$(CC) $(PP_CFLAGS) -c -o $@ $<
 
-build/rawgpu: $(SRC) $(HDR) $(ATOM_OBJ) $(PP_OBJ)
-	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ $(SRC) $(ATOM_OBJ) $(PP_OBJ)
+build/rawgpu: $(OBJ_DIR)/main.o $(LIB_OBJ) $(ATOM_OBJ) $(PP_OBJ)
+	$(CC) $(CFLAGS) -o $@ $^
+
+build/librawgpu.a: $(LIB_OBJ) $(ATOM_OBJ) $(PP_OBJ)
+	rm -f $@
+	ar rcs $@ $^
+
+build/librawgpu.dylib: $(LIB_OBJ) $(ATOM_OBJ) $(PP_OBJ)
+	$(CC) -dynamiclib -install_name @rpath/librawgpu.dylib -o $@ $^
 
 build/atom.o: src/atom/upstream/atom.c src/atom/shim/rg_kcompat.h
 	@mkdir -p build
@@ -71,7 +100,14 @@ build/kernels/%.o: kernels/%.cl $(DEVICE_LIBS)/opencl.bc
 	@mkdir -p build/kernels
 	$(AMDGPU_CLANG) $(AMDGPU_CFLAGS) -c -o $@ $<
 
+# examples against the static library
+examples: build/examples/saxpy
+
+build/examples/%: examples/%.c build/librawgpu.a include/rawgpu.h
+	@mkdir -p build/examples
+	$(CC) $(CFLAGS) -Iinclude -o $@ $< build/librawgpu.a
+
 clean:
 	rm -rf build
 
-.PHONY: ids regs atom-names kernels clean
+.PHONY: all ids regs atom-names kernels examples clean

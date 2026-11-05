@@ -108,12 +108,14 @@ static int bench_flops(vi_ctx *c, const vi_kern *k, bool fused) {
   return r ? r : bad ? -EIO : 0;
 }
 
-/* 3: sgemm n x n. Entries are multiples of 1/16 in [-0.5, 0.5], so every
- * partial sum is exact in float and any summation order gives the same bits. */
-static int bench_sgemm(vi_ctx *c, const vi_kern *k, uint32_t n) {
+/* 3: sgemm. Entries are multiples of 1/16 in [-0.5, 0.5], so every partial
+ * sum is exact in float and any summation order gives the same bits; sampled
+ * rows are checked against the CPU. `tiled` is the register-blocked
+ * sgemm_nn (any size, 128x128 tiles), else the original 16x16 kernel. */
+static int bench_sgemm(vi_ctx *c, const vi_kern *k, uint32_t n, bool tiled) {
   size_t elems = (size_t)n * n, bytes = elems * 4;
   float *A = malloc(bytes), *B = malloc(bytes), *C = malloc(bytes);
-  vi_buf a, b, cc;
+  vi_buf a = {0}, b = {0}, cc = {0};
   int r = A && B && C ? 0 : -ENOMEM;
   for (size_t i = 0; !r && i < elems; i++) {
     A[i] = (float)((int)((i * 7 + 3) % 17) - 8) / 16.0f;
@@ -125,24 +127,34 @@ static int bench_sgemm(vi_ctx *c, const vi_kern *k, uint32_t n) {
   if (!r) r = vi_buf_write(c, &a, 0, A, bytes);
   if (!r) r = vi_buf_write(c, &b, 0, B, bytes);
   if (!r) r = vi_buf_fill(c, &cc, 0xFFFFFFFFu);
-  struct { uint64_t a, b, c; uint32_t n; } __attribute__((packed)) args = {a.gpu, b.gpu, cc.gpu, n};
-  const uint32_t grid[3] = {n, n, 1}, wg[3] = {16, 16, 1};
+  struct __attribute__((packed)) { uint64_t a, b, c; uint32_t n; } args16 = {a.gpu, b.gpu, cc.gpu, n};
+  struct __attribute__((packed)) {
+    uint64_t a, b, c;
+    uint32_t m, n, k, lda, ldb, ldc;
+    float alpha, beta;
+  } args = {a.gpu, b.gpu, cc.gpu, n, n, n, n, n, n, 1.0f, 0.0f};
+  uint32_t g = tiled ? (n + 127) / 128 * 16 : n;
+  const uint32_t grid[3] = {g, g, 1}, wg[3] = {16, 16, 1};
   double t = 0;
-  if (!r) r = best_of(c, k, &args, sizeof args, grid, wg, 3, &t);
+  if (!r) r = tiled ? best_of(c, k, &args, sizeof args, grid, wg, 3, &t) : best_of(c, k, &args16, sizeof args16, grid, wg, 3, &t);
   if (!r) r = vi_buf_read(c, &cc, 0, C, bytes);
   size_t bad = 0, rows = 0;
-  for (uint32_t row = 0; !r && row < n; row += n / 64 ? n / 64 : 1, rows++)
+  for (uint32_t row = 0; !r && row < n; row += n / 32 ? n / 32 : 1, rows++)
     for (uint32_t col = 0; col < n; col++) {
       float acc = 0.0f;
       for (uint32_t kk = 0; kk < n; kk++) acc = fmaf(A[(size_t)row * n + kk], B[(size_t)kk * n + col], acc);
       bad += memcmp(&acc, &C[(size_t)row * n + col], 4) != 0;
     }
   if (!r)
-    printf("sgemm:        %ux%u, 16x16 LDS tiles: %.2f ms, %.0f GFLOPS; %zu rows %s the CPU\n", n, n, t * 1e3,
+    printf("sgemm:        %ux%u, %s: %.2f ms, %.0f GFLOPS; %zu rows %s the CPU\n", n, n,
+           tiled ? "sgemm_nn (8x8 per work-item, 128x128 tiles)" : "sgemm16 (16x16 LDS tiles)", t * 1e3,
            2.0 * n * n * n / t / 1e9, rows, bad ? "DIFFER from" : "match");
   free(A);
   free(B);
   free(C);
+  vi_buf_free(c, &a);
+  vi_buf_free(c, &b);
+  vi_buf_free(c, &cc);
   return r ? r : bad ? -EIO : 0;
 }
 
@@ -158,7 +170,7 @@ int vi_cmd_bench_compute(rg_dev *d, const rg_ident *id, int argc, char **argv) {
   vi_ctx c;
   int r = vi_ctx_open(&c, d, id);
   if (r) return r;
-  vi_kern kc = {0}, kf = {0}, km = {0}, ks = {0}, kk = {0};
+  vi_kern kc = {0}, kf = {0}, km = {0}, ks = {0}, kt = {0}, kk = {0};
   char path[512];
   snprintf(path, sizeof path, "%s/copy.o", dir);
   if (!r) r = vi_kern_load(&c, &kc, path, "copy4");
@@ -166,7 +178,8 @@ int vi_cmd_bench_compute(rg_dev *d, const rg_ident *id, int argc, char **argv) {
   if (!r) r = vi_kern_load(&c, &kf, path, "fma_peak");
   if (!r) r = vi_kern_load(&c, &km, path, "mad_peak");
   snprintf(path, sizeof path, "%s/sgemm.o", dir);
-  if (!r) r = vi_kern_load(&c, &ks, path, "sgemm");
+  if (!r) r = vi_kern_load(&c, &ks, path, "sgemm16");
+  if (!r) r = vi_kern_load(&c, &kt, path, "sgemm_nn");
   snprintf(path, sizeof path, "%s/clock.o", dir);
   if (!r) r = vi_kern_load(&c, &kk, path, "clock_probe");
   if (!r) {
@@ -178,12 +191,15 @@ int vi_cmd_bench_compute(rg_dev *d, const rg_ident *id, int argc, char **argv) {
   }
   if (!r) r = bench_flops(&c, &km, false);
   if (!r) r = bench_flops(&c, &kf, true);
-  if (!r) r = bench_sgemm(&c, &ks, n);
+  if (!r) r = bench_sgemm(&c, &ks, n, false);
+  if (!r) r = bench_sgemm(&c, &kt, n, true);
+  for (uint32_t big = 2048; !r && big <= 4096 && big > n; big *= 2) r = bench_sgemm(&c, &kt, big, true);
   printf("temperature:  %d C\n", vi_temp_c(&c.v));
   vi_kern_free(&c, &kc);
   vi_kern_free(&c, &kf);
   vi_kern_free(&c, &km);
   vi_kern_free(&c, &ks);
+  vi_kern_free(&c, &kt);
   vi_kern_free(&c, &kk);
   vi_ctx_close(&c);
   if (r && r != -EIO) fprintf(stderr, "rawgpu: bench-compute failed (%d)\n", r);
