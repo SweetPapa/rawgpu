@@ -180,11 +180,11 @@ int vi_cmd_bench_compute(rg_dev *d, const rg_ident *id, int argc, char **argv) {
   if (!r) r = bench_flops(&c, &kf, true);
   if (!r) r = bench_sgemm(&c, &ks, n);
   printf("temperature:  %d C\n", vi_temp_c(&c.v));
-  vi_kern_free(&kc);
-  vi_kern_free(&kf);
-  vi_kern_free(&km);
-  vi_kern_free(&ks);
-  vi_kern_free(&kk);
+  vi_kern_free(&c, &kc);
+  vi_kern_free(&c, &kf);
+  vi_kern_free(&c, &km);
+  vi_kern_free(&c, &ks);
+  vi_kern_free(&c, &kk);
   vi_ctx_close(&c);
   if (r && r != -EIO) fprintf(stderr, "rawgpu: bench-compute failed (%d)\n", r);
   return r;

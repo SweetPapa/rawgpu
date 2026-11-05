@@ -79,6 +79,8 @@ REGS = [
     # wave debug (gfx_v8_0_read_wave_data())
     "SQ_IND_INDEX", "SQ_IND_DATA", "SQ_WAVE_STATUS", "SQ_WAVE_PC_LO", "SQ_WAVE_PC_HI", "SQ_WAVE_HW_ID",
     "SQ_WAVE_TRAPSTS", "SQ_WAVE_IB_STS", "SQ_WAVE_INST_DW0", "GMCON_DEBUG",
+    # scratch for compute kernels: the buffer descriptor (fields only) and the flat-scratch base
+    "SQ_BUF_RSRC_WORD*", "SH_HIDDEN_PRIVATE_BASE_VMID",
     "FEATURE_STATUS", "PWR_SVI2_STATUS", "TARGET_AND_CURRENT_PROFILE_INDEX", "TARGET_AND_CURRENT_PROFILE_INDEX_1",
     # MC sequencer firmware (gmc_v8_0_polaris_mc_load_microcode())
     "MC_SEQ_IO_DEBUG_INDEX", "MC_SEQ_IO_DEBUG_DATA", "MC_SEQ_SUP_PGM",

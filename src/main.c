@@ -1,4 +1,5 @@
 /* rawgpu CLI. Every command is read-only unless noted. */
+#include "amd_kernel.h"
 #include "rg.h"
 
 #include <errno.h>
@@ -16,7 +17,8 @@ static const char *usage =
   "  vbios -o FILE    save the VBIOS image (writes the ROM index register, as amdgpu does)\n"
   "  bench [N]        round-trip latency of config and register reads\n"
   "  dma-test [KB]    allocate a DMA buffer and print its bus addresses (no GPU activity)\n"
-  "  reset            WRITES: PCIe reset through TinyGPU (FLR, else hot reset); a no-op on the RX 590\n";
+  "  reset            WRITES: PCIe reset through TinyGPU (FLR, else hot reset); a no-op on the RX 590\n"
+  "  kernel-info FILE describe the kernels in a code object (no GPU needed)\n";
 
 static void print_backend_usage(FILE *f, const rg_backend *b) {
   fprintf(f, "\n%s commands:\n", b->name);
@@ -144,6 +146,15 @@ int main(int argc, char **argv) {
   if (i + 1 < argc && !strcmp(argv[i], "--sock")) { sock = argv[i + 1]; i += 2; }
   const char *cmd = i < argc ? argv[i++] : "probe";
   if (!strcmp(cmd, "-h") || !strcmp(cmd, "--help") || !strcmp(cmd, "help")) { print_usage(stdout); return 0; }
+
+  if (!strcmp(cmd, "kernel-info")) { /* needs no device */
+    if (i >= argc) { print_usage(stderr); return 1; }
+    amd_program p;
+    if (amd_program_load(&p, argv[i])) return 1;
+    amd_program_print(stdout, &p);
+    amd_program_free(&p);
+    return 0;
+  }
 
   rg_dev d;
   int r = rg_open_tinygpu(&d, sock);

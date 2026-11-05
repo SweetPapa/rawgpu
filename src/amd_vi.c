@@ -534,6 +534,7 @@ int vi_cmd_dpm_info(rg_dev *d, const rg_ident *id, int argc, char **argv);      
 int vi_cmd_dpm_enable(rg_dev *d, const rg_ident *id, int argc, char **argv);    /* amd_vi_dpm.c */
 int vi_cmd_didt(rg_dev *d, const rg_ident *id, int argc, char **argv);          /* amd_vi_dpm.c */
 int vi_cmd_waves(rg_dev *d, const rg_ident *id, int argc, char **argv);         /* amd_vi_gfx.c */
+int vi_cmd_kernel_test(rg_dev *d, const rg_ident *id, int argc, char **argv);   /* amd_vi_ktest.c */
 int vi_cmd_gfx_reset(rg_dev *d, const rg_ident *id, int argc, char **argv);     /* amd_vi_gfx.c */
 
 static const rg_cmd vi_cmds[] = {
@@ -558,6 +559,9 @@ static const rg_cmd vi_cmds[] = {
   {"dpm-enable", "[--no-didt] [--no-mclk] [--no-deep-sleep] [--no-ulv] [--level auto|low|high] [-v] [--trace FILE]",
    "WRITES: amdgpu's power management: DPM tables into the SMC, clock/voltage DPM, fan and power limits on",
    vi_cmd_dpm_enable},
+  {"kernel-test", "[--skip NAME,...] [CODE_OBJECT]",
+   "the kernel ABI: work-items, dispatch packet, scratch, constants, atomics, LDS, math accuracy (build/kernels/abi_test.o)",
+   vi_cmd_kernel_test},
   {"waves", "", "every live shader wave: PC, status, current instruction (writes only the SQ/GRBM index registers)",
    vi_cmd_waves},
   {"gfx-reset", "", "WRITES: amdgpu's GFX soft reset (gfx_v8_0_soft_reset()) to clear a hung compute queue", vi_cmd_gfx_reset},

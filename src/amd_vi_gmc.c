@@ -173,6 +173,7 @@ int vi_gmc_init(vi_dev *v, vi_gart *g, uint64_t dummy_page_bus) {
   uint64_t fb_end = g->vram_start + g->vram_size - 1;
   uint64_t size_bf = g->vram_start, size_af = MC_MASK + 1 - ((fb_end + FOUR_GB) & ~(FOUR_GB - 1));
   g->gart_size = GART_SIZE;
+  rg_ranges_init(&g->pages, 0, g->gart_size >> 12);
   if ((size_bf >= g->gart_size && size_bf < size_af) || size_af < g->gart_size) g->gart_start = 0;
   else g->gart_start = MC_MASK - g->gart_size + 1;
   g->gart_start &= ~(FOUR_GB - 1);
@@ -206,7 +207,12 @@ int vi_gmc_init(vi_dev *v, vi_gart *g, uint64_t dummy_page_bus) {
 
 int vi_gart_map(vi_dev *v, vi_gart *g, const rg_dma *b, uint64_t *gpu) {
   uint32_t pages = (uint32_t)((b->size + 4095) >> 12), total = (uint32_t)(g->gart_size >> 12);
-  if (pages > total - g->next_page) { fprintf(stderr, "rawgpu: GART full (%u pages free, %u needed)\n", total - g->next_page, pages); return -ENOSPC; }
+  uint64_t first;
+  if (rg_ranges_alloc(&g->pages, (pages + 15) & ~15u, 16, &first)) { /* keep mappings 64 KB aligned */
+    fprintf(stderr, "rawgpu: GART full (%llu of %u pages free, largest run %llu; %u needed)\n",
+            (unsigned long long)rg_ranges_free_bytes(&g->pages), total, (unsigned long long)rg_ranges_largest(&g->pages), pages);
+    return -ENOSPC;
+  }
   uint64_t *pte = malloc((size_t)pages * 8);
   if (!pte) return -ENOMEM;
   for (uint32_t i = 0; i < pages; i++) {
@@ -214,19 +220,32 @@ int vi_gart_map(vi_dev *v, vi_gart *g, const rg_dma *b, uint64_t *gpu) {
     if (!bus || (bus & 0xFFF) || (bus & ~(PTE_ADDR_MASK | 0xFFF))) {
       fprintf(stderr, "rawgpu: bus address 0x%llx of page %u cannot go in a VI PTE\n", (unsigned long long)bus, i);
       free(pte);
+      rg_ranges_free(&g->pages, first, (pages + 15) & ~15u);
       return -EINVAL;
     }
     /* amdgpu_ttm_tt_pte_flags() for cached system memory, plus gmc_v8's EXECUTABLE */
     pte[i] = bus | PTE_VALID | PTE_SYSTEM | PTE_SNOOPED | PTE_READABLE | PTE_WRITEABLE | PTE_EXECUTABLE;
   }
-  int r = v->d->ops->mmio_write(v->d, VI_VRAM_BAR, VI_VRAM_GART_TABLE + (uint64_t)g->next_page * 8, pte, (size_t)pages * 8);
+  int r = v->d->ops->mmio_write(v->d, VI_VRAM_BAR, VI_VRAM_GART_TABLE + first * 8, pte, (size_t)pages * 8);
   free(pte);
   if (r) return r;
   vi_hdp_flush(v);
   tlb_flush_vmid0(v);
-  *gpu = g->gart_start + ((uint64_t)g->next_page << 12);
-  g->next_page += (pages + 15) & ~15u; /* keep mappings 64 KB aligned */
+  *gpu = g->gart_start + (first << 12);
   return v->err;
+}
+
+void vi_gart_unmap(vi_dev *v, vi_gart *g, uint64_t gpu, uint64_t size) {
+  if (gpu < g->gart_start || !size) return;
+  uint64_t first = (gpu - g->gart_start) >> 12, pages = (size + 4095) >> 12;
+  uint64_t *zero = calloc(pages, 8);
+  if (zero) { /* invalid PTEs: a stray access faults to the default page instead of reaching freed memory */
+    v->d->ops->mmio_write(v->d, VI_VRAM_BAR, VI_VRAM_GART_TABLE + first * 8, zero, pages * 8);
+    free(zero);
+    vi_hdp_flush(v);
+    tlb_flush_vmid0(v);
+  }
+  rg_ranges_free(&g->pages, first, (pages + 15) & ~15ull);
 }
 
 /* gmc_v8_0_{check,pre,post}_soft_reset() + gmc_v8_0_soft_reset(): if the MC or

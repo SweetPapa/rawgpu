@@ -44,7 +44,6 @@
 #define PACKET3_TC_ACTION_ENA (1u << 23)
 #define PACKET3_SH_KCACHE_ACTION_ENA (1u << 27)
 #define PACKET3_SH_ICACHE_ACTION_ENA (1u << 29)
-#define EF_AMDGPU_MACH_AMDGCN_GFX803 0x2a
 #define WRITE_DATA_DST_SEL(x) ((uint32_t)(x) << 8) /* 5 = memory */
 #define WR_CONFIRM (1u << 20)
 #define WRITE_DATA_ENGINE_SEL(x) ((uint32_t)(x) << 30)
@@ -133,9 +132,18 @@ static void constants(vi_dev *v) {
   smc = REG_SET_FIELD(smc, SH_STATIC_MEM_CONFIG, ELEMENT_SIZE, 1);
   smc = REG_SET_FIELD(smc, SH_STATIC_MEM_CONFIG, INDEX_STRIDE, 3);
   vi_wreg(v, mmSH_STATIC_MEM_CONFIG, smc);
+}
 
+/* VMID 0's shader memory config. amdgpu gives VMID 0 (its own, which runs no
+ * real kernels) MTYPE UC: no L2 caching, and global atomics never complete.
+ * rawgpu runs everything in VMID 0, so it uses what gfx_v8_0_constants_init()
+ * gives the VMIDs that run user shaders, and what KFD uses for compute: NC,
+ * cached in L2 without CPU coherence. Every dispatch invalidates L2 first and
+ * writes it back at its end-of-pipe fence, so host memory stays coherent at
+ * dispatch boundaries. */
+static void sh_mem_vmid0(vi_dev *v) {
   vi_srbm_select(v, 0, 0, 0, 0);
-  uint32_t x = REG_SET_FIELD(0, SH_MEM_CONFIG, DEFAULT_MTYPE, MTYPE_UC);
+  uint32_t x = REG_SET_FIELD(0, SH_MEM_CONFIG, DEFAULT_MTYPE, MTYPE_NC);
   x = REG_SET_FIELD(x, SH_MEM_CONFIG, APE1_MTYPE, MTYPE_UC);
   x = REG_SET_FIELD(x, SH_MEM_CONFIG, ALIGNMENT_MODE, SH_MEM_ALIGNMENT_MODE_UNALIGNED);
   vi_wreg(v, mmSH_MEM_CONFIG, x);
@@ -257,11 +265,13 @@ void vi_state_clear(vi_dev *v) {
  * and the MEC, so the RLC is not reset again while power management runs. */
 int vi_gfx_compute_init(vi_dev *v) {
   if (state_flags(v) & STATE_GFX_UP) {
+    sh_mem_vmid0(v);
     cp_doorbells_and_mec(v);
     return v->err;
   }
   golden_registers(v);
   constants(v);
+  sh_mem_vmid0(v);
   int r = rlc_resume(v);
   if (r) return r;
   gui_idle_interrupt_off(v); /* gfx_v8_0_cp_resume() */
@@ -530,16 +540,40 @@ int vi_cq_ring_test(vi_cq *q) {
 
 int vi_kernel_check(const amd_kernel *k) {
   const char *why = NULL;
-  uint16_t supported = AMD_KCP_PRIVATE_SEGMENT_BUFFER | AMD_KCP_KERNARG_SEGMENT_PTR;
-  if (k->mach != EF_AMDGPU_MACH_AMDGCN_GFX803) why = "it is not built for gfx803 (Polaris): use -mcpu=gfx803";
-  else if (k->private_segment_size || REG_GET_FIELD(k->rsrc2, COMPUTE_PGM_RSRC2, SCRATCH_EN))
-    why = "it uses scratch memory, which rawgpu does not set up yet";
+  uint16_t supported = AMD_KCP_PRIVATE_SEGMENT_BUFFER | AMD_KCP_DISPATCH_PTR | AMD_KCP_KERNARG_SEGMENT_PTR |
+                       AMD_KCP_DISPATCH_ID | AMD_KCP_FLAT_SCRATCH_INIT | AMD_KCP_PRIVATE_SEGMENT_SIZE;
+  if (k->prog->mach != EF_AMDGPU_MACH_AMDGCN_GFX803) why = "it is not built for gfx803 (Polaris): use -mcpu=gfx803";
   else if (k->group_segment_size > VI_LDS_MAX) why = "it wants more than 64 KB of LDS";
-  else if (k->code_properties & ~supported)
-    why = "it wants user SGPRs beyond the private segment buffer and kernarg pointer (dispatch/queue pointers)";
+  else if (k->code_properties & AMD_KCP_QUEUE_PTR)
+    why = "it wants the queue pointer (OpenCL 2.0 generic address casts on gfx8), which rawgpu does not provide";
+  else if (k->code_properties & ~supported) why = "it wants user SGPRs rawgpu does not know";
+  else if (k->dynamic_stack) why = "it needs a dynamic stack (recursion or calls rawgpu cannot size)";
   else if (k->entry & 0xFF) why = "its entry point is not 256-byte aligned";
   if (why) fprintf(stderr, "rawgpu: kernel %s: %s\n", k->name, why);
   return why ? -ENOTSUP : 0;
+}
+
+int vi_scratch_config(uint32_t private_segment_size, unsigned cus, uint64_t max_bytes, vi_scratch_cfg *out) {
+  memset(out, 0, sizeof *out);
+  if (!private_segment_size) return 0;
+  out->lane_bytes = (private_segment_size + 15) & ~15u;
+  uint32_t wavesize = (64 * out->lane_bytes + 1023) / 1024; /* 1 KB units */
+  if (wavesize > COMPUTE_TMPRING_SIZE__WAVESIZE_MASK >> COMPUTE_TMPRING_SIZE__WAVESIZE__SHIFT) return -E2BIG;
+  uint64_t waves = max_bytes / (wavesize * 1024ull), most = 32ull * cus; /* KFD: max_slots_scratch_cu = 32 */
+  if (waves > most) waves = most;
+  if (waves > COMPUTE_TMPRING_SIZE__WAVES_MASK) waves = COMPUTE_TMPRING_SIZE__WAVES_MASK;
+  waves &= ~3ull; /* divisible by the number of SEs */
+  if (!waves) return -E2BIG;
+  out->tmpring = REG_SET_FIELD(REG_SET_FIELD(0, COMPUTE_TMPRING_SIZE, WAVES, (uint32_t)waves), COMPUTE_TMPRING_SIZE,
+                               WAVESIZE, wavesize);
+  out->bytes = waves * wavesize * 1024ull;
+  return 0;
+}
+
+/* kfd's set_scratch_backing_va(): the register holds the base >> 16 (libhsakmt) */
+void vi_set_scratch_base(vi_dev *v, uint64_t gpu) {
+  vi_srbm_select(v, 0, 0, 0, 0);
+  vi_wreg(v, mmSH_HIDDEN_PRIVATE_BASE_VMID, (uint32_t)(gpu >> 16));
 }
 
 static void cq_set_sh(vi_cq *q, uint32_t reg, const uint32_t *vals, uint32_t n) {
@@ -563,23 +597,53 @@ static void cq_mem_sync(vi_cq *q) {
 /* The register state and DISPATCH_DIRECT amdgpu uses for its own compute
  * dispatch (gfx_v8_0_do_edc_gpr_workarounds()), with the program, resources
  * and user SGPRs from the kernel descriptor. */
-uint32_t vi_cq_dispatch(vi_cq *q, const amd_kernel *k, uint64_t code_gpu, uint64_t kernarg_gpu, const uint32_t wg[3],
-                        const uint32_t groups[3]) {
-  uint32_t user[6], nu = 0;
-  if (k->code_properties & AMD_KCP_PRIVATE_SEGMENT_BUFFER) { user[nu++] = 0; user[nu++] = 0; user[nu++] = 0; user[nu++] = 0; }
-  if (k->code_properties & AMD_KCP_KERNARG_SEGMENT_PTR) { user[nu++] = (uint32_t)kernarg_gpu; user[nu++] = (uint32_t)(kernarg_gpu >> 32); }
+uint32_t vi_cq_dispatch(vi_cq *q, const amd_kernel *k, const vi_dispatch *dd, const uint32_t wg[3], const uint32_t groups[3]) {
+  uint32_t user[16], nu = 0;
+  uint16_t kcp = k->code_properties;
+  if (kcp & AMD_KCP_PRIVATE_SEGMENT_BUFFER) { /* ROCr's scratch V# (AqlQueue::FillBufRsrcWord0..3()) */
+    uint64_t base = dd->scratch.bytes ? dd->scratch_gpu : 0;
+    user[nu++] = (uint32_t)base;
+    user[nu++] = REG_SET_FIELD(REG_SET_FIELD(0, SQ_BUF_RSRC_WORD1, BASE_ADDRESS_HI, (uint32_t)(base >> 32)),
+                               SQ_BUF_RSRC_WORD1, SWIZZLE_ENABLE, 1);
+    user[nu++] = (uint32_t)dd->scratch.bytes; /* NUM_RECORDS */
+    uint32_t w3 = REG_SET_FIELD(0, SQ_BUF_RSRC_WORD3, DST_SEL_X, 4); /* SQ_SEL_X..W */
+    w3 = REG_SET_FIELD(w3, SQ_BUF_RSRC_WORD3, DST_SEL_Y, 5);
+    w3 = REG_SET_FIELD(w3, SQ_BUF_RSRC_WORD3, DST_SEL_Z, 6);
+    w3 = REG_SET_FIELD(w3, SQ_BUF_RSRC_WORD3, DST_SEL_W, 7);
+    w3 = REG_SET_FIELD(w3, SQ_BUF_RSRC_WORD3, NUM_FORMAT, 4);   /* BUF_NUM_FORMAT_UINT */
+    w3 = REG_SET_FIELD(w3, SQ_BUF_RSRC_WORD3, DATA_FORMAT, 4);  /* BUF_DATA_FORMAT_32 */
+    w3 = REG_SET_FIELD(w3, SQ_BUF_RSRC_WORD3, ELEMENT_SIZE, 1); /* 4 bytes */
+    w3 = REG_SET_FIELD(w3, SQ_BUF_RSRC_WORD3, INDEX_STRIDE, 3); /* 64 */
+    w3 = REG_SET_FIELD(w3, SQ_BUF_RSRC_WORD3, ADD_TID_ENABLE, 1);
+    user[nu++] = w3;                                            /* TYPE 0: SQ_RSRC_BUF */
+  }
+  if (kcp & AMD_KCP_DISPATCH_PTR) { user[nu++] = (uint32_t)dd->packet_gpu; user[nu++] = (uint32_t)(dd->packet_gpu >> 32); }
+  if (kcp & AMD_KCP_KERNARG_SEGMENT_PTR) { user[nu++] = (uint32_t)dd->kernarg_gpu; user[nu++] = (uint32_t)(dd->kernarg_gpu >> 32); }
+  if (kcp & AMD_KCP_DISPATCH_ID) { user[nu++] = (uint32_t)dd->dispatch_id; user[nu++] = (uint32_t)(dd->dispatch_id >> 32); }
+  if (kcp & AMD_KCP_FLAT_SCRATCH_INIT) { /* offset from SH_HIDDEN_PRIVATE_BASE_VMID, then bytes per lane */
+    user[nu++] = 0;
+    user[nu++] = dd->scratch.lane_bytes;
+  }
+  if (kcp & AMD_KCP_PRIVATE_SEGMENT_SIZE) user[nu++] = dd->scratch.lane_bytes;
   if (nu != REG_GET_FIELD(k->rsrc2, COMPUTE_PGM_RSRC2, USER_SGPR)) {
     fprintf(stderr, "rawgpu: kernel %s: descriptor enables %u user SGPRs, RSRC2 says %u\n", k->name, nu,
             REG_GET_FIELD(k->rsrc2, COMPUTE_PGM_RSRC2, USER_SGPR));
     return 0;
   }
-  if (cq_reserve(q, 96)) return 0;
-  uint64_t pgm = (code_gpu + k->entry) >> 8;
+  if (k->private_segment_size && !dd->scratch.bytes) {
+    fprintf(stderr, "rawgpu: kernel %s needs %u bytes of scratch per work-item and the dispatch has none\n", k->name,
+            k->private_segment_size);
+    return 0;
+  }
+  if (cq_reserve(q, 112)) return 0;
+  uint64_t pgm = dd->code_gpu >> 8;
   const uint32_t start[3] = {0, 0, 0};
   /* LDS is allocated per work-group in 128-dword (512-byte) blocks on GFX7+ */
-  uint32_t rsrc2 = REG_SET_FIELD(k->rsrc2, COMPUTE_PGM_RSRC2, LDS_SIZE, (k->group_segment_size + 511) / 512);
+  uint32_t lds = dd->lds_bytes > k->group_segment_size ? dd->lds_bytes : k->group_segment_size;
+  if (lds > VI_LDS_MAX) { fprintf(stderr, "rawgpu: kernel %s: %u bytes of LDS per work-group; at most 64 KB\n", k->name, lds); return 0; }
+  uint32_t rsrc2 = REG_SET_FIELD(k->rsrc2, COMPUTE_PGM_RSRC2, LDS_SIZE, (lds + 511) / 512);
   const uint32_t pgm_addr[2] = {(uint32_t)pgm, (uint32_t)(pgm >> 32)}, rsrc[2] = {k->rsrc1, rsrc2};
-  const uint32_t all_cus[2] = {0xffffffff, 0xffffffff}, zero = 0;
+  const uint32_t all_cus[2] = {0xffffffff, 0xffffffff}, zero = 0, tmpring = k->private_segment_size ? dd->scratch.tmpring : 0;
   cq_mem_sync(q);
   cq_set_sh(q, mmCOMPUTE_START_X, start, 3);
   cq_set_sh(q, mmCOMPUTE_NUM_THREAD_X, wg, 3);
@@ -588,7 +652,7 @@ uint32_t vi_cq_dispatch(vi_cq *q, const amd_kernel *k, uint64_t code_gpu, uint64
   cq_set_sh(q, mmCOMPUTE_RESOURCE_LIMITS, &zero, 1);
   cq_set_sh(q, mmCOMPUTE_STATIC_THREAD_MGMT_SE0, all_cus, 2);
   cq_set_sh(q, mmCOMPUTE_STATIC_THREAD_MGMT_SE2, all_cus, 2);
-  cq_set_sh(q, mmCOMPUTE_TMPRING_SIZE, &zero, 1);
+  cq_set_sh(q, mmCOMPUTE_TMPRING_SIZE, &tmpring, 1);
   if (nu) cq_set_sh(q, mmCOMPUTE_USER_DATA_0, user, nu);
   cq_put(q, PACKET3(PACKET3_DISPATCH_DIRECT, 3));
   cq_put(q, groups[0]);
@@ -688,6 +752,15 @@ int vi_cmd_gfx_reset(rg_dev *d, const rg_ident *id, int argc, char **argv) {
   t = vi_rreg(&v, mmGMCON_DEBUG);
   vi_wreg(&v, mmGMCON_DEBUG, t & ~(GMCON_DEBUG__GFX_STALL_MASK | GMCON_DEBUG__GFX_CLEAR_MASK));
   vi_udelay(100);
+  /* The MEC is halted, so its HQD registers take direct writes (gfx_v8_0_mqd_commit() writes ACTIVE the same
+   * way). A queue the reset left active would otherwise wait forever for a drain the next process requests. */
+  vi_srbm_select(&v, 1, 0, 0, 0);
+  vi_wreg(&v, mmCP_HQD_DEQUEUE_REQUEST, 0);
+  vi_wreg(&v, mmCP_HQD_PQ_RPTR, 0);
+  vi_wreg(&v, mmCP_HQD_PQ_WPTR, 0);
+  vi_wreg(&v, mmCP_HQD_ACTIVE, 0);
+  printf("HQD:    ACTIVE now 0x%x\n", vi_rreg(&v, mmCP_HQD_ACTIVE));
+  vi_srbm_select(&v, 0, 0, 0, 0);
   vi_state_clear(&v); /* the next compute command brings GFX up again */
   printf("after:  GRBM_STATUS 0x%08x, SRBM_STATUS 0x%08x\n", vi_rreg(&v, mmGRBM_STATUS), vi_rreg(&v, mmSRBM_STATUS));
   rg_pci_err e;
@@ -772,7 +845,8 @@ int vi_cmd_compute_test(rg_dev *d, const rg_ident *id, int argc, char **argv) {
 
   rg_dma ctrl = {.fd = -1}, ha = {.fd = -1}, hb = {.fd = -1}, hc = {.fd = -1};
   vi_cq q = {0};
-  amd_kernel k = {0};
+  amd_program prog = {0};
+  const amd_kernel *kp = NULL;
   float *ref = NULL, *buf = NULL;
   int phase = 0;
   /* ctrl (host): writeback for the host-memory test at +0, VM fault default page at +0x11000 */
@@ -830,17 +904,20 @@ int vi_cmd_compute_test(rg_dev *d, const rg_ident *id, int argc, char **argv) {
   PHASE("latency:      submit -> fence seen, best of 20: %.0f us", best * 1e6);
 
   /* 5-6: a compiled kernel, c[i] = a[i] + b[i] over 1M floats, first in host memory, then in VRAM */
-  int kr = amd_kernel_load(&k, kernel_path, "vadd");
+  int kr = amd_program_load(&prog, kernel_path);
   if (kr == -ENOENT) { printf("dispatch:     skipped: %s is not built (make kernels)\n", kernel_path); goto out; }
-  if (kr || (r = vi_kernel_check(&k))) { r = kr ? kr : r; goto out; }
+  if (kr) { r = kr; goto out; }
+  if (!(kp = amd_program_kernel(&prog, "vadd"))) { r = -ENOENT; goto out; }
+  if ((r = vi_kernel_check(kp))) goto out;
   const uint32_t N = 1u << 20, WG = 64;
   const size_t bytes = (size_t)N * 4;
-  const uint64_t V_CODE = V_DATA + 0x1000, CODE_REGION = ((k.code_size + 4095) & ~(size_t)4095) + 4096;
+  const uint64_t V_CODE = V_DATA + 0x1000, CODE_REGION = ((prog.image_size + 4095) & ~(size_t)4095) + 4096;
   const uint64_t V_KARG = V_CODE + CODE_REGION, V_A = 64ull << 20, V_B = 80ull << 20, V_C = 96ull << 20;
   if (!(ref = malloc(bytes)) || !(buf = malloc(bytes))) { r = -ENOMEM; goto out; }
-  if ((r = vi_vram_zero(&v, V_CODE, CODE_REGION)) || (r = vi_vram_write(&v, V_CODE, k.code, k.code_size))) goto out;
-  printf("kernel:       %s from %s: %zu bytes of gfx803 code, %u-byte kernargs, RSRC1 0x%08x RSRC2 0x%08x\n", k.name,
-         kernel_path, k.code_size, k.kernarg_size, k.rsrc1, k.rsrc2);
+  amd_program_relocate(&prog, g.vram_start + V_CODE);
+  if ((r = vi_vram_zero(&v, V_CODE, CODE_REGION)) || (r = vi_vram_write(&v, V_CODE, prog.image, prog.image_size))) goto out;
+  printf("kernel:       %s from %s: %zu-byte gfx803 image, %u-byte kernargs, RSRC1 0x%08x RSRC2 0x%08x\n", kp->name,
+         kernel_path, prog.image_size, kp->kernarg_size, kp->rsrc1, kp->rsrc2);
 
   if ((r = d->ops->dma_alloc(d, bytes, &ha)) || (r = d->ops->dma_alloc(d, bytes, &hb)) || (r = d->ops->dma_alloc(d, bytes, &hc)))
     goto out;
@@ -870,7 +947,8 @@ int vi_cmd_compute_test(rg_dev *d, const rg_ident *id, int argc, char **argv) {
     vi_hdp_flush(&v);
     double t = vi_now();
     const uint32_t wg[3] = {WG, 1, 1}, groups[3] = {N / WG, 1, 1};
-    seq = vi_cq_dispatch(&q, &k, g.vram_start + V_CODE, g.vram_start + V_KARG, wg, groups);
+    const vi_dispatch dd = {.code_gpu = g.vram_start + V_CODE + kp->entry, .kernarg_gpu = g.vram_start + V_KARG};
+    seq = vi_cq_dispatch(&q, kp, &dd, wg, groups);
     if (!seq || (r = vi_cq_wait(&q, seq, 5000))) { vi_cq_dump(&q); r = r ? r : -EIO; goto out; }
     t = vi_now() - t;
     const float *out = C;
@@ -898,7 +976,7 @@ out:
   if (ha.cpu) d->ops->dma_free(d, &ha);
   if (hb.cpu) d->ops->dma_free(d, &hb);
   if (hc.cpu) d->ops->dma_free(d, &hc);
-  amd_kernel_free(&k);
+  amd_program_free(&prog);
   free(ref);
   free(buf);
   if (!r) r = v.err;

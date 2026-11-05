@@ -2,6 +2,42 @@
 
 Dated, factual notes from real hardware. Newest first.
 
+## 2026-11-04: kernel ABI for ordinary OpenCL C
+
+Work toward a library: kernels that use OpenCL's built-ins, scratch and
+program-scope constants.
+
+- **Device libraries.** Clang links AMD's ROCm-Device-Libs bitcode into each
+  kernel at compile time, so every OpenCL built-in is there (work-item
+  functions, ocml math, vload/vstore, conversions, atomics) and no linker is
+  needed. `tools/fetch-device-libs.sh` pins Debian's rocm-device-libs-17
+  package (ROCm 6.0, built with upstream LLVM 17); Homebrew clang 20 reads it.
+- **Loader** (`src/amd_kernel.c`). It is now a small linker:
+  - It lays out every allocated section and resolves relocations for the
+    load address. That makes `__constant` tables work. It can build a GOT,
+    and it names any undefined symbols.
+  - It parses the msgpack metadata note: argument layout, hidden arguments,
+    work-group limits.
+  - `rawgpu kernel-info FILE` prints this without a GPU.
+- **Dispatch.** Every user SGPR except the queue pointer:
+  - scratch as ROCr sizes it (swizzled buffer descriptor, `COMPUTE_TMPRING_SIZE`,
+    flat-scratch init, `SH_HIDDEN_PRIVATE_BASE_VMID` = base >> 16);
+  - an AQL dispatch packet for the dispatch pointer;
+  - the code object v5 hidden arguments, from the metadata;
+  - dynamic `__local` arguments.
+- **First run of `rawgpu kernel-test`:**
+  - Work-item functions in a 3-D launch passed, as did the dispatch packet
+    and relocated constants.
+  - **Global atomics on VRAM hung the GPU.** 1440 waves sat at
+    `s_waitcnt vmcnt(0)` after their `flat_atomic_*`.
+  - Cause: rawgpu runs everything in VMID 0 and had copied amdgpu's VMID 0
+    `SH_MEM_CONFIG`, `DEFAULT_MTYPE = UC`, which bypasses L2, where GCN
+    executes atomics. amdgpu gives its user-shader VMIDs MTYPE NC, and so does
+    KFD for compute (`kfd_device_queue_manager_vi.c`). rawgpu now does too.
+  - `gfx-reset` (now also forcing the HQD inactive) cleared the waves. The
+    next queue still stalled on its first cache-flushing fence, so the stuck
+    atomics outlive a GRBM soft reset: power cycle.
+
 ## 2026-11-04: stage 5, the RX 590 at its rated clocks
 
 Sixth attempt, on a freshly power-cycled card. The Mac stayed up through all

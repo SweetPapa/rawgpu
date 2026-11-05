@@ -3112,6 +3112,10 @@
 #define SDMA1_UCODE_ADDR__VALUE_MASK                         0x1fff
 #define SDMA1_UCODE_ADDR__VALUE__SHIFT                       0x0
 
+#define mmSH_HIDDEN_PRIVATE_BASE_VMID                        0x2580  /* gca/gfx_8_0 */
+#define SH_HIDDEN_PRIVATE_BASE_VMID__ADDRESS_MASK            0xffffffff
+#define SH_HIDDEN_PRIVATE_BASE_VMID__ADDRESS__SHIFT          0x0
+
 #define mmSH_MEM_APE1_BASE                                   0x230b  /* gca/gfx_8_0 */
 #define SH_MEM_APE1_BASE__BASE_MASK                          0xffffffff
 #define SH_MEM_APE1_BASE__BASE__SHIFT                        0x0
@@ -3315,6 +3319,54 @@
 #define SPI_RESOURCE_RESERVE_EN_CU_1__RESERVE_SPACE_ONLY__SHIFT 0x18
 #define SPI_RESOURCE_RESERVE_EN_CU_1__TYPE_MASK_MASK         0xfffe
 #define SPI_RESOURCE_RESERVE_EN_CU_1__TYPE_MASK__SHIFT       0x1
+
+#define mmSQ_BUF_RSRC_WORD0                                  0x23c0  /* gca/gfx_8_0 */
+#define SQ_BUF_RSRC_WORD0__BASE_ADDRESS_MASK                 0xffffffff
+#define SQ_BUF_RSRC_WORD0__BASE_ADDRESS__SHIFT               0x0
+
+#define mmSQ_BUF_RSRC_WORD1                                  0x23c1  /* gca/gfx_8_0 */
+#define SQ_BUF_RSRC_WORD1__BASE_ADDRESS_HI_MASK              0xffff
+#define SQ_BUF_RSRC_WORD1__BASE_ADDRESS_HI__SHIFT            0x0
+#define SQ_BUF_RSRC_WORD1__CACHE_SWIZZLE_MASK                0x40000000
+#define SQ_BUF_RSRC_WORD1__CACHE_SWIZZLE__SHIFT              0x1e
+#define SQ_BUF_RSRC_WORD1__STRIDE_MASK                       0x3fff0000
+#define SQ_BUF_RSRC_WORD1__STRIDE__SHIFT                     0x10
+#define SQ_BUF_RSRC_WORD1__SWIZZLE_ENABLE_MASK               0x80000000
+#define SQ_BUF_RSRC_WORD1__SWIZZLE_ENABLE__SHIFT             0x1f
+
+#define mmSQ_BUF_RSRC_WORD2                                  0x23c2  /* gca/gfx_8_0 */
+#define SQ_BUF_RSRC_WORD2__NUM_RECORDS_MASK                  0xffffffff
+#define SQ_BUF_RSRC_WORD2__NUM_RECORDS__SHIFT                0x0
+
+#define mmSQ_BUF_RSRC_WORD3                                  0x23c3  /* gca/gfx_8_0 */
+#define SQ_BUF_RSRC_WORD3__ADD_TID_ENABLE_MASK               0x800000
+#define SQ_BUF_RSRC_WORD3__ADD_TID_ENABLE__SHIFT             0x17
+#define SQ_BUF_RSRC_WORD3__ATC_MASK                          0x1000000
+#define SQ_BUF_RSRC_WORD3__ATC__SHIFT                        0x18
+#define SQ_BUF_RSRC_WORD3__DATA_FORMAT_MASK                  0x78000
+#define SQ_BUF_RSRC_WORD3__DATA_FORMAT__SHIFT                0xf
+#define SQ_BUF_RSRC_WORD3__DST_SEL_W_MASK                    0xe00
+#define SQ_BUF_RSRC_WORD3__DST_SEL_W__SHIFT                  0x9
+#define SQ_BUF_RSRC_WORD3__DST_SEL_X_MASK                    0x7
+#define SQ_BUF_RSRC_WORD3__DST_SEL_X__SHIFT                  0x0
+#define SQ_BUF_RSRC_WORD3__DST_SEL_Y_MASK                    0x38
+#define SQ_BUF_RSRC_WORD3__DST_SEL_Y__SHIFT                  0x3
+#define SQ_BUF_RSRC_WORD3__DST_SEL_Z_MASK                    0x1c0
+#define SQ_BUF_RSRC_WORD3__DST_SEL_Z__SHIFT                  0x6
+#define SQ_BUF_RSRC_WORD3__ELEMENT_SIZE_MASK                 0x180000
+#define SQ_BUF_RSRC_WORD3__ELEMENT_SIZE__SHIFT               0x13
+#define SQ_BUF_RSRC_WORD3__HASH_ENABLE_MASK                  0x2000000
+#define SQ_BUF_RSRC_WORD3__HASH_ENABLE__SHIFT                0x19
+#define SQ_BUF_RSRC_WORD3__HEAP_MASK                         0x4000000
+#define SQ_BUF_RSRC_WORD3__HEAP__SHIFT                       0x1a
+#define SQ_BUF_RSRC_WORD3__INDEX_STRIDE_MASK                 0x600000
+#define SQ_BUF_RSRC_WORD3__INDEX_STRIDE__SHIFT               0x15
+#define SQ_BUF_RSRC_WORD3__MTYPE_MASK                        0x38000000
+#define SQ_BUF_RSRC_WORD3__MTYPE__SHIFT                      0x1b
+#define SQ_BUF_RSRC_WORD3__NUM_FORMAT_MASK                   0x7000
+#define SQ_BUF_RSRC_WORD3__NUM_FORMAT__SHIFT                 0xc
+#define SQ_BUF_RSRC_WORD3__TYPE_MASK                         0xc0000000
+#define SQ_BUF_RSRC_WORD3__TYPE__SHIFT                       0x1e
 
 #define mmSQ_CONFIG                                          0x2300  /* gca/gfx_8_0 */
 #define SQ_CONFIG__DEBUG_EN_MASK                             0x100

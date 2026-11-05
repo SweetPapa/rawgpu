@@ -3,6 +3,7 @@
 #define RAWGPU_AMD_VI_H
 
 #include "rg.h"
+#include "rg_ranges.h"
 #include "amd_fw.h"
 #include "amd_kernel.h"
 #include "amd_vi_regs.h"
@@ -55,12 +56,14 @@ double vi_now(void);
 typedef struct {
   uint64_t vram_start, vram_size; /* MC address range of VRAM */
   uint64_t gart_start, gart_size; /* MC address range the GART translates */
-  uint32_t next_page;             /* bump allocator, in 4 KB GART pages */
+  rg_ranges pages;                /* free GART pages (4 KB units) */
 } vi_gart;
 
 int vi_gmc_init(vi_dev *v, vi_gart *g, uint64_t dummy_page_bus);
-/* Maps every 4 KB page of `b` into the GART; *gpu = MC address of byte 0. */
+/* Maps every 4 KB page of `b` into the GART, 64 KB aligned; *gpu = MC address of byte 0. */
 int vi_gart_map(vi_dev *v, vi_gart *g, const rg_dma *b, uint64_t *gpu);
+/* Clears the PTEs of a mapping vi_gart_map() made and frees its pages */
+void vi_gart_unmap(vi_dev *v, vi_gart *g, uint64_t gpu, uint64_t size);
 void vi_hdp_flush(vi_dev *v);
 void vi_hdp_invalidate(vi_dev *v);
 void vi_gmc_report(vi_dev *v);
@@ -190,12 +193,35 @@ uint32_t vi_cq_write(vi_cq *q, uint64_t gpu, uint32_t value);
 int vi_cq_wait(vi_cq *q, uint32_t seq, unsigned timeout_ms);
 void vi_cq_dump(vi_cq *q);
 #define VI_LDS_MAX (64u << 10) /* LDS per compute unit */
-/* Can vi_cq_dispatch() run this kernel? (gfx803, no scratch, LDS within a CU,
- * only the private-segment and kernarg user SGPRs.) Prints why not. */
+/* Can vi_cq_dispatch() run this kernel? (gfx803, LDS within a CU, no queue
+ * pointer or dynamic stack.) Prints why not. */
 int vi_kernel_check(const amd_kernel *k);
-/* Dispatches groups[0..2] work-groups of wg[0..2] work-items, code at MC
- * address code_gpu (256-byte aligned), then a fence; returns the fence seq or 0. */
-uint32_t vi_cq_dispatch(vi_cq *q, const amd_kernel *k, uint64_t code_gpu, uint64_t kernarg_gpu, const uint32_t wg[3],
-                        const uint32_t groups[3]);
+
+/* Scratch (private memory) for one dispatch, sized as ROCr sizes it
+ * (AqlQueue::FillComputeTmpRingSize()): COMPUTE_TMPRING_SIZE and the backing
+ * it needs. Up to 32 scratch waves per CU, a multiple of the 4 SEs. */
+typedef struct {
+  uint32_t lane_bytes; /* private segment size per work-item, 16-byte aligned */
+  uint32_t tmpring;    /* COMPUTE_TMPRING_SIZE */
+  uint64_t bytes;      /* backing to allocate */
+} vi_scratch_cfg;
+/* Fails if even 4 waves' worth would not fit in max_bytes. */
+int vi_scratch_config(uint32_t private_segment_size, unsigned cus, uint64_t max_bytes, vi_scratch_cfg *out);
+
+typedef struct {
+  uint64_t code_gpu;    /* the kernel's first instruction (256-byte aligned) */
+  uint64_t kernarg_gpu; /* kernarg segment, 16-byte aligned */
+  uint64_t packet_gpu;  /* hsa_kernel_dispatch_packet_t, for kernels that read the dispatch pointer */
+  uint64_t scratch_gpu; /* scratch backing (64 KB aligned; SH_HIDDEN_PRIVATE_BASE_VMID points at it) */
+  vi_scratch_cfg scratch;
+  uint64_t dispatch_id;
+  uint32_t lds_bytes;   /* LDS per work-group: the kernel's own plus any dynamic __local arguments */
+} vi_dispatch;
+/* Points the SPI's flat-scratch base for VMID 0 at `gpu` (64 KB aligned).
+ * Only while no dispatch that uses scratch is running. */
+void vi_set_scratch_base(vi_dev *v, uint64_t gpu);
+/* Dispatches groups[0..2] work-groups of wg[0..2] work-items, then a fence;
+ * returns the fence seq or 0. The user SGPRs follow the kernel's descriptor. */
+uint32_t vi_cq_dispatch(vi_cq *q, const amd_kernel *k, const vi_dispatch *dd, const uint32_t wg[3], const uint32_t groups[3]);
 
 #endif

@@ -1,8 +1,8 @@
 CC ?= clang
 CFLAGS ?= -O2 -g -std=gnu11 -Wall -Wextra -Wno-unused-parameter
 SRC := src/main.c src/transport_tinygpu.c src/pci.c src/family.c src/amd_atom.c src/amd_fw.c \
-       src/amd_vi.c src/amd_vi_gmc.c src/amd_vi_sdma.c src/amd_vi_smu.c src/amd_vi_gfx.c src/amd_kernel.c src/amd_vi_ctx.c src/amd_vi_bench.c src/amd_vi_dpm.c
-HDR := src/rg.h src/amd_ids.inc src/atom/rg_atom.h src/amd_fw.h src/amd_vi.h src/amd_vi_regs.h src/amd_vi_regnames.inc src/upstream/vi_structs.h src/amd_kernel.h src/amd_vi_ctx.h src/pp/rg_pp.h
+       src/amd_vi.c src/amd_vi_gmc.c src/amd_vi_sdma.c src/amd_vi_smu.c src/amd_vi_gfx.c src/amd_kernel.c src/amd_vi_ctx.c src/amd_vi_bench.c src/amd_vi_dpm.c src/rg_ranges.c src/amd_vi_ktest.c
+HDR := src/rg.h src/amd_ids.inc src/atom/rg_atom.h src/amd_fw.h src/amd_vi.h src/amd_vi_regs.h src/amd_vi_regnames.inc src/upstream/vi_structs.h src/amd_kernel.h src/amd_vi_ctx.h src/pp/rg_pp.h src/rg_ranges.h
 
 # amdgpu's ATOM interpreter, compiled unmodified against the kernel shims.
 # -fno-strict-aliasing and -Wno-pointer-sign match how the kernel builds it.
@@ -53,15 +53,21 @@ atom-names:
 	python3 -I tools/gen_atom_names.py src/atom/upstream/atombios.h > src/atom/rg_atom_names.inc
 
 # GPU kernels, compiled for gfx803 (Polaris) with an LLVM that has the AMDGPU
-# target (Homebrew's llvm does; Apple's clang does not). No device libraries
-# or linker are needed: rawgpu loads the relocatable object directly.
+# target (Homebrew's llvm does; Apple's clang does not). Clang links AMD's
+# device libraries (the OpenCL built-ins, tools/fetch-device-libs.sh) into
+# each object at compile time, so no linker is needed: rawgpu loads the
+# relocatable object directly.
 AMDGPU_CLANG ?= /opt/homebrew/opt/llvm/bin/clang
-AMDGPU_CFLAGS := -x cl -cl-std=CL1.2 -target amdgcn-amd-amdhsa -mcpu=gfx803 -O2 -nogpulib
-KERNELS := build/kernels/vadd.o build/kernels/copy.o build/kernels/fma.o build/kernels/sgemm.o build/kernels/clock.o
+DEVICE_LIBS := local/device-libs
+AMDGPU_CFLAGS := -x cl -cl-std=CL1.2 -target amdgcn-amd-amdhsa -mcpu=gfx803 -O2 --rocm-device-lib-path=$(DEVICE_LIBS)
+KERNELS := $(patsubst kernels/%.cl,build/kernels/%.o,$(wildcard kernels/*.cl))
 
 kernels: $(KERNELS)
 
-build/kernels/%.o: kernels/%.cl
+$(DEVICE_LIBS)/opencl.bc:
+	tools/fetch-device-libs.sh
+
+build/kernels/%.o: kernels/%.cl $(DEVICE_LIBS)/opencl.bc
 	@mkdir -p build/kernels
 	$(AMDGPU_CLANG) $(AMDGPU_CFLAGS) -c -o $@ $<
 
