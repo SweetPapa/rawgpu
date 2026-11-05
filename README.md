@@ -93,6 +93,20 @@ At 1280x720, from `--bench` (2026-11-04):
 Needs pygame, numpy and Pillow (`pip install pygame numpy pillow`), and
 ffmpeg for `--record`.
 
+## EmbeddingGemma 2
+
+`models/embeddinggemma2/` runs Google's EmbeddingGemma 2 text embedding
+model entirely on the RX 590, in float32. It matches the reference
+implementation to cosine 1.000000.
+
+On MuSiQue retrieval it runs 1.61x as fast as the same model on the M4
+Pro's own GPU (PyTorch MPS):
+- **Wikipedia paragraphs:** 62/s against 35/s.
+- **2000-token documents:** 1.8/s against 1.5/s.
+- **Quality:** recall is identical.
+
+See [models/embeddinggemma2/README.md](models/embeddinggemma2/README.md).
+
 ## Quick start
 
 ```sh

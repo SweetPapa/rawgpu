@@ -2,6 +2,53 @@
 
 Dated, factual notes from real hardware. Newest first.
 
+## 2026-11-04: EmbeddingGemma 2 on the card, and a stale fence after an unclean exit
+
+`models/embeddinggemma2/` runs Google's EmbeddingGemma 2 text encoder end to
+end on the RX 590. It's 24 layers with per-layer embeddings, sliding-window
+and full attention, a 768-dimensional output, and float32 throughout. The
+matrix products use the register-blocked SGEMM, plus new batched NN/NT
+variants for attention (heads and grouped KV heads by strides). Fourteen
+small kernels do the rest.
+
+- **Against the reference** (sentence-transformers, fp32, CPU), across 8
+  texts, two prompts and up to 1209 tokens: identical token ids, and cosine
+  1.000000 for every embedding, with a largest coordinate difference of
+  2.4e-7.
+- **MuSiQue retrieval:** 7029 paragraphs, 500 questions, and 64 documents of
+  about 1926 tokens.
+  - RX 590: 62 / 184 / 1.8 per second.
+  - M4 Pro GPU (MPS, fp32): 35 / 160 / 1.5 per second.
+  - Totals: 152 s against 246 s, so 1.61x. Recall@5 is 0.668 on both,
+    and the two devices' embeddings agree to cosine 1.000000.
+
+**The bug the first wrong answers came from:** OpenCL's `sincos(x, &c)`
+returns the sine and stores the cosine, and the RoPE kernel had them
+swapped.
+
+**A library bug found on the way:**
+- **Symptom:** a process opening the card right after another exited
+  without `rawgpu_close()` had its first few launches report done before
+  they ran, so reads returned stale data. The trigger was any process with
+  torch loaded, where `__del__` does not run at exit.
+- **Cause:** `vi_cq_start()` cleared the writeback page (now host memory,
+  at the same GART address in every process) and only then drained the
+  queue the earlier process had left active. The drain rewrote that
+  queue's last fence (600 in the repro) into the new page. Waits for
+  sequence numbers below it returned at once until the GPU wrote its first
+  real fence.
+- **Fix:**
+  - Retire the old queue first, then clear the memory.
+  - After a dequeue, reset `CP_HQD_DEQUEUE_REQUEST`, `PQ_RPTR` and
+    `PQ_WPTR` to 0, as `gfx_v8_0_deactivate_hqd()` does.
+  - The Python binding closes open devices from an `atexit` hook.
+- **Result:** the repro (a hard `os._exit()`, then launch-and-read
+  rounds) went from 4 of 4 failing to 0 of 8.
+
+**Also:** the weight download hung for an hour on dead CDN connections
+(CLOSE_WAIT) with one 48 MiB Xet chunk never written. Fetching that range
+with an HTTP Range request and checking the SHA-256 recovered it.
+
 ## 2026-11-04: host load of the demos, and fences in host memory
 
 A windowed stress suite: each scene for 60 s, then a 65536-star galaxy.

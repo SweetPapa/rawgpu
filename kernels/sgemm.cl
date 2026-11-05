@@ -85,10 +85,8 @@ static inline void store_row(__global float *C, uint ldc, uint row, uint col, ui
   for (int j = 0; j < n; j++) p[j] = beta != 0.0f ? beta * p[j] + alpha * e[j] : alpha * e[j];
 }
 
-#define SGEMM(NAME, A_KCONTIG, B_KCONTIG)                                                                          \
-  __kernel __attribute__((reqd_work_group_size(16, 16, 1), amdgpu_waves_per_eu(WAVES_PER_EU))) void NAME(       \
-      __global const float *A, __global const float *B, __global float *C, uint M, uint N, uint K, uint lda,       \
-      uint ldb, uint ldc, float alpha, float beta) {                                                                \
+/* The SGEMM itself, for A, B, C, M, N, K, lda, ldb, ldc, alpha, beta in scope */
+#define SGEMM_BODY(A_KCONTIG, B_KCONTIG) \
     __local float As[2][TK * LS] __attribute__((aligned(16)));                                                     \
     __local float Bs[2][TK * LS] __attribute__((aligned(16)));                                                     \
     uint tx = get_local_id(0), ty = get_local_id(1), tid = ty * 16 + tx;                                           \
@@ -131,7 +129,28 @@ static inline void store_row(__global float *C, uint ldc, uint row, uint col, ui
       store_row(C, ldc, row, n0 + tx * 4, M, N, (float4)(acc[i][0], acc[i][1], acc[i][2], acc[i][3]), alpha, beta); \
       store_row(C, ldc, row, n0 + 64 + tx * 4, M, N, (float4)(acc[i][4], acc[i][5], acc[i][6], acc[i][7]), alpha,   \
                 beta);                                                                                             \
-    }                                                                                                              \
+    }
+
+#define SGEMM(NAME, A_KCONTIG, B_KCONTIG)                                                                          \
+  __kernel __attribute__((reqd_work_group_size(16, 16, 1), amdgpu_waves_per_eu(WAVES_PER_EU))) void NAME(       \
+      __global const float *A, __global const float *B, __global float *C, uint M, uint N, uint K, uint lda,       \
+      uint ldb, uint ldc, float alpha, float beta) {                                                                \
+    SGEMM_BODY(A_KCONTIG, B_KCONTIG)                                                                               \
+  }
+
+/* Strided batched SGEMM: one product per work-group layer z = b * heads + h (the grid's third dimension).
+ * Each operand starts at base + b * s?b + h * s?h (elements); B's head index is h / kv_group, so
+ * grouped-query attention can share one key or value head between kv_group query heads. */
+#define SGEMM_BATCHED(NAME, A_KCONTIG, B_KCONTIG)                                                                  \
+  __kernel __attribute__((reqd_work_group_size(16, 16, 1), amdgpu_waves_per_eu(WAVES_PER_EU))) void NAME(       \
+      __global const float *A0, __global const float *B0, __global float *C0, uint M, uint N, uint K, uint lda,    \
+      uint ldb, uint ldc, float alpha, float beta, uint heads, uint kv_group, ulong sAb, ulong sAh, ulong sBb,      \
+      ulong sBh, ulong sCb, ulong sCh) {                                                                            \
+    uint z = get_group_id(2), zb = z / heads, zh = z % heads;                                                      \
+    __global const float *A = A0 + zb * sAb + zh * sAh;                                                            \
+    __global const float *B = B0 + zb * sBb + (zh / kv_group) * sBh;                                               \
+    __global float *C = C0 + zb * sCb + zh * sCh;                                                                  \
+    SGEMM_BODY(A_KCONTIG, B_KCONTIG)                                                                               \
   }
 
 /* op(A) = A: k contiguous. op(B) = B: n contiguous; op(B) = B^T: k contiguous. */
@@ -139,6 +158,8 @@ SGEMM(sgemm_nn, 1, 0)
 SGEMM(sgemm_nt, 1, 1)
 SGEMM(sgemm_tn, 0, 0)
 SGEMM(sgemm_tt, 0, 1)
+SGEMM_BATCHED(sgemm_batched_nn, 1, 0)
+SGEMM_BATCHED(sgemm_batched_nt, 1, 1)
 
 /* The original 16x16-tile kernel. */
 #define TS 16
