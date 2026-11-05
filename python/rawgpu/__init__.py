@@ -240,6 +240,15 @@ class Buffer:
         if _L().rawgpu_write(self.dev._h, self._h, 0, a.ctypes.data, a.nbytes):
             raise self.dev._err()
 
+    def host_view(self):
+        """A numpy array that *is* this host buffer's memory (no copy). The GPU writes it
+        directly: read it only after the launches that write it are done."""
+        if not self.host:
+            raise Error("host_view() needs a host buffer (host=True)")
+        ptr = _L().rawgpu_buf_host(self._h)
+        raw = (ctypes.c_uint8 * self.nbytes).from_address(ptr)
+        return np.frombuffer(raw, dtype=self.dtype).reshape(self.shape)
+
     def numpy(self):
         """Copy to a new numpy array (waits for pending launches)."""
         out = np.empty(self.shape, self.dtype)

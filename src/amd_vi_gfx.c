@@ -39,6 +39,8 @@
 #define PACKET3_SET_SH_REG_START 0x2c00
 #define PACKET3_DISPATCH_DIRECT 0x15
 #define PACKET3_ACQUIRE_MEM 0x58
+#define PACKET3_EVENT_WRITE 0x46
+#define CS_PARTIAL_FLUSH 7 /* event: wait until earlier compute work has finished */
 #define PACKET3_TC_WB_ACTION_ENA (1u << 18)
 #define PACKET3_TCL1_ACTION_ENA (1u << 22)
 #define PACKET3_TC_ACTION_ENA (1u << 23)
@@ -582,8 +584,14 @@ static void cq_set_sh(vi_cq *q, uint32_t reg, const uint32_t *vals, uint32_t n) 
   for (uint32_t i = 0; i < n; i++) cq_put(q, vals[i]);
 }
 
-/* gfx_v8_0_emit_mem_sync_compute(): invalidate L1/L2 and the shader caches */
+/* gfx_v8_0_emit_mem_sync_compute(): invalidate L1/L2 and the shader caches. The
+ * CS partial flush first, as amdgpu's own dispatches do: the end-of-pipe fence
+ * after a dispatch only reports its completion, so without it the next
+ * dispatch starts while the previous one still runs, and launches that
+ * depend on each other read half-written data. */
 static void cq_mem_sync(vi_cq *q) {
+  cq_put(q, PACKET3(PACKET3_EVENT_WRITE, 0));
+  cq_put(q, EVENT_TYPE(CS_PARTIAL_FLUSH) | EVENT_INDEX(4));
   cq_put(q, PACKET3(PACKET3_ACQUIRE_MEM, 5));
   cq_put(q, PACKET3_TCL1_ACTION_ENA | PACKET3_TC_ACTION_ENA | PACKET3_SH_KCACHE_ACTION_ENA |
                 PACKET3_SH_ICACHE_ACTION_ENA | PACKET3_TC_WB_ACTION_ENA); /* CP_COHER_CNTL */

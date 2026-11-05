@@ -2,6 +2,39 @@
 
 Dated, factual notes from real hardware. Newest first.
 
+## 2026-11-04: visual demos, and a launch-ordering bug they found
+
+`demos/rawgpu_demo.py` runs three scenes, rendered and simulated on the
+RX 590, in a pygame window. Frames go straight into GART-mapped host
+memory, two of them alternating.
+
+**The first ball-scene frames were corrupt** (flat dark halves, a block of
+garbage). Consecutive dispatches on the compute queue overlapped:
+- The end-of-pipe `RELEASE_MEM` after each dispatch only reports
+  completion; it does not hold back the next dispatch.
+- So the 8 physics substeps and the render ran on top of each other.
+- The fix: `vi_cq_dispatch()` now emits `EVENT_WRITE CS_PARTIAL_FLUSH`
+  before its cache invalidate, as amdgpu's own dispatches do
+  (`gfx_v8_0_do_edc_gpr_workarounds()`).
+- No earlier test had chained dependent launches without a wait.
+  `python/test_rawgpu.py` now runs 100 of them on 1M floats, exact.
+- Speed is unchanged (SGEMM 4.80 TFLOPS at 4096).
+
+**Rendering fixes:**
+- NaN pixels came from `powr()` of negative colours, through an AO term
+  that went below zero where balls overlap. Both are clamped now.
+- Mirror balls aliased badly at one ray per pixel. They now take 4 more
+  reflected rays across the pixel, from re-intersecting the same ball, and
+  matte balls reflect only the sky.
+
+**`--bench` at 1280x720:**
+
+| scene | fps | engine | max temp | work |
+|---|---|---|---|---|
+| bouncing balls | 46.8-47.5 | 1191-1545 MHz | 72 C | 512 balls, 98-100 M collision checks/s |
+| valley flyover | 74-79 | 1544-1545 MHz | 70 C | 68-72 Mpixel/s ray-marched |
+| galaxy collision | 60.1-60.6 | 1430-1545 MHz | 72 C | 32768 stars, 129-130 G interactions/s, >= 2.58 TFLOPS |
+
 ## 2026-11-04: the library, on a power-cycled card
 
 - **`build/examples/saxpy` brought the cold card up through the library**

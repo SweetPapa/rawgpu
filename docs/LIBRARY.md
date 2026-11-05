@@ -54,7 +54,8 @@ rawgpu_close(g);                              /* frees everything still open */
 `examples/saxpy.c` is a complete program. The header (`include/rawgpu.h`)
 documents every call. The rules:
 
-- **Order.** Launches are asynchronous and run in the order they were made.
+- **Order.** Launches are asynchronous and run in the order they were made,
+  each one finishing before the next starts (a CS partial flush between them).
   `rawgpu_wait()` waits for one, `rawgpu_finish()` for all of them.
   Transfers (`write`, `read`, `copy`, `fill`) wait for every launch first,
   and are complete when they return.

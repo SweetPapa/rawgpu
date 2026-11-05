@@ -58,6 +58,41 @@ print(x.numpy()[:4], gpu.matmul(gpu.array(a), gpu.array(a)).numpy()[0, :4])
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) and [docs/LOG.md](docs/LOG.md).
 
+## Visual demos
+
+`demos/rawgpu_demo.py` shows what the card can do. Every pixel and every
+physics step is computed by the RX 590 through librawgpu. Frames render
+straight into Mac memory and appear in a window. Two frame buffers
+alternate, so drawing and display overlap. They double as a stress test:
+an overlay shows the frame rate, the engine clock and the temperature, and
+`--bench` runs every scene and prints a summary.
+
+```sh
+python3 demos/rawgpu_demo.py                  # keys 1 / 2 / 3 switch scenes; space kicks the balls
+python3 demos/rawgpu_demo.py --scene valley
+python3 demos/rawgpu_demo.py --bench          # 15 s per scene, then the numbers
+python3 demos/rawgpu_demo.py --record demo.mp4 --seconds 30
+```
+
+| Bouncing balls | Valley flyover | Galaxy collision |
+|---|---|---|
+| ![balls](docs/images/demo-balls.jpg) | ![valley](docs/images/demo-valley.jpg) | ![galaxy](docs/images/demo-galaxy.jpg) |
+
+At 1280x720, from `--bench` (2026-11-04):
+
+- **Bouncing balls, about 47 fps.** 512 balls, with physics on the GPU
+  (100 M collision checks/s), ray-traced with shadows, ambient occlusion and
+  reflections. Mirror balls get 4 extra reflected rays per pixel.
+- **Valley flyover, about 75 fps.** A procedural landscape ray-marched per
+  pixel (up to 260 steps through 7 octaves of noise), with soft shadows,
+  snow, water reflections, clouds and fog.
+- **Galaxy collision, about 60 fps.** 32768 stars under full N-body gravity
+  (130 G interactions/s, at least 2.6 TFLOPS sustained), drawn with atomic
+  additive splatting.
+
+Needs pygame, numpy and Pillow (`pip install pygame numpy pillow`), and
+ffmpeg for `--record`.
+
 ## Quick start
 
 ```sh

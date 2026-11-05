@@ -82,6 +82,17 @@ def main():
     err = np.max(np.abs(v.numpy() - ref))
     check("gelu (ocml erf)", err < 1e-6, f"max abs error {err:.1e}")
 
+    # launches run in order: 100 dependent launches with no wait between them
+    inc = gpu.program("__kernel void inc(__global float *x) { size_t i = get_global_id(0); x[i] = x[i] * 1.01f + 1.0f; }")
+    acc = gpu.zeros(1 << 20)
+    for _ in range(100):
+        inc.inc(acc, global_size=1 << 20)
+    want = np.float32(0)
+    for _ in range(100):
+        want = np.float32(want * np.float32(1.01) + np.float32(1.0))
+    got = acc.numpy()
+    check("launch order", np.all(got == want), f"100 chained launches on 1M floats: {got.min()}..{got.max()}, want {want}")
+
     # host memory: the kernel writes the CPU's buffer directly
     h = gpu.empty(4096, np.float32, host=True)
     h.write(np.arange(4096, dtype=np.float32))
