@@ -365,7 +365,9 @@ static int cmd_who(const char *sock, int argc, char **argv) {
     printf(",\"server_pid\":%d,\"client_count\":%d,\"clients\":[", pid, clients);
     for (int i = 0; i < npeers; i++) {
       proc_cmdline(peers[i], cmdline, sizeof cmdline);
-      printf("%s{\"pid\":%d,\"command\":", i ? "," : "", peers[i]);
+      struct proc_bsdinfo bi;
+      long started = proc_pidinfo(peers[i], PROC_PIDTBSDINFO, 0, &bi, sizeof bi) == sizeof bi ? (long)bi.pbi_start_tvsec : 0;
+      printf("%s{\"pid\":%d,\"started\":%ld,\"command\":", i ? "," : "", peers[i], started);
       json_str(cmdline);
       printf("}");
     }

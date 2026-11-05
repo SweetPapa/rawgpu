@@ -7,51 +7,60 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header>
-    <form id="form" autocomplete="off">
-      <input id="q" type="search" placeholder="Describe the code you're looking for…" spellcheck="false" autofocus>
-      <button id="go" type="submit" class="primary">Search</button>
-    </form>
-    <div class="controls">
-      <div class="seg" role="radiogroup" aria-label="Embed the query on">
-        <button type="button" data-backend="rawgpu" role="radio">RX 590</button>
-        <button type="button" data-backend="mps" role="radio">Mac GPU</button>
-        <button type="button" data-backend="cpu" role="radio">Mac CPU</button>
+  <div class="app">
+    <header class="titlebar" data-tauri-drag-region>
+      <div class="search">
+        <svg class="search-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4.5 4.5"/></svg>
+        <input id="q" type="text" placeholder="Describe the code you're looking for" spellcheck="false" autocomplete="off" autofocus aria-label="Search">
+        <span id="spinner" class="spinner" hidden></span>
+        <button id="clear-q" class="icon-btn" type="button" title="Clear" hidden>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 4.5 7 7m0-7-7 7"/></svg>
+        </button>
+        <kbd class="kbd-hint">⌘K</kbd>
       </div>
-      <label>Project
-        <input id="project" list="projects" placeholder="all" spellcheck="false">
-        <datalist id="projects"></datalist>
-      </label>
-      <label>Results
-        <select id="k"><option>10</option><option selected>20</option><option>50</option></select>
-      </label>
-      <label class="check"><input id="dedupe" type="checkbox" checked> Fold copies</label>
-      <label>Open in <select id="editor"></select></label>
-    </div>
-    <div id="statusbar" class="statusbar">
-      <span id="status">Starting…</span>
-      <span id="card" class="card-state"></span>
-    </div>
-  </header>
+      <div class="seg" id="backends" role="radiogroup" aria-label="Embed queries on">
+        <button type="button" role="radio" data-backend="rawgpu" title="Embed queries on the RX 590 (⌘1)"><span class="bdot"></span>RX 590</button>
+        <button type="button" role="radio" data-backend="mps" title="Embed queries on the Mac's GPU with PyTorch (⌘2)"><span class="bdot"></span>Mac GPU</button>
+        <button type="button" role="radio" data-backend="cpu" title="Embed queries on the Mac's CPU with PyTorch (⌘3)"><span class="bdot"></span>Mac CPU</button>
+      </div>
+    </header>
 
-  <div id="error" class="error" hidden>
-    <span id="error-text"></span>
-    <span class="error-actions">
-      <button id="use-mac" type="button" hidden>Use the Mac GPU instead</button>
-      <button id="restart" type="button" hidden>Restart the search backend</button>
-      <button id="log" type="button">Log</button>
-    </span>
+    <div class="filterbar" data-tauri-drag-region>
+      <button class="chip" id="f-project" type="button"><span class="chip-k">Project</span><span class="chip-v">Any</span></button>
+      <button class="chip" id="f-lang" type="button"><span class="chip-k">Language</span><span class="chip-v">Any</span></button>
+      <button class="chip" id="f-path" type="button"><span class="chip-k">Path</span><span class="chip-v">Any</span></button>
+      <button class="link-btn" id="f-clear" type="button" hidden>Clear filters</button>
+      <span class="spacer" data-tauri-drag-region></span>
+      <label class="toggle" title="One result per file, with its best matches"><input type="checkbox" id="group" checked><span>Group by file</span></label>
+      <label class="toggle" title="Fold identical chunks from copies of a project"><input type="checkbox" id="dedupe" checked><span>Fold copies</span></label>
+      <label class="mini">Show
+        <select id="k"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option></select>
+      </label>
+    </div>
+
+    <div id="banner" class="banner" role="alert" hidden>
+      <svg class="banner-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5 18 17H2z"/><path d="M10 8v4m0 2.6v.1"/></svg>
+      <span id="banner-text"></span>
+      <span class="banner-actions" id="banner-actions"></span>
+    </div>
+
+    <main class="split">
+      <aside class="list" aria-label="Results">
+        <ol id="results" class="results"></ol>
+      </aside>
+      <section class="preview" id="preview" aria-label="Preview"></section>
+    </main>
+
+    <footer class="statusbar">
+      <span class="sb-backend" id="sb-backend"></span>
+      <span class="sb-timing" id="sb-timing"></span>
+      <span class="sb-keys"><kbd>↑↓</kbd> results <kbd>⌥↑↓</kbd> matches <kbd>⌘↩</kbd> open <kbd>⌘1–3</kbd> backend</span>
+    </footer>
   </div>
 
-  <main>
-    <ol id="results" class="results"></ol>
-    <article id="preview" class="preview">
-      <div class="empty" id="empty">
-        <p>Search your code by meaning: “where do we retry failed uploads”, “websocket audio streaming on ESP32”, “terraform for a Cloud Run service”.</p>
-        <p class="muted" id="index-line"></p>
-      </div>
-    </article>
-  </main>
+  <div id="popover" class="popover" hidden></div>
+  <div id="toast" class="toast" hidden></div>
+  <script src="vendor/highlight.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

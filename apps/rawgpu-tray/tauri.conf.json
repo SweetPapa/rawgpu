@@ -3,31 +3,70 @@
   "productName": "rawgpu",
   "version": "0.1.0",
   "identifier": "dev.rawgpu.tray",
-  "build": { "frontendDist": "ui" },
+  "build": {
+    "frontendDist": "ui"
+  },
   "app": {
     "withGlobalTauri": true,
     "windows": [
       {
-        "label": "main",
+        "label": "panel",
+        "title": "rawgpu",
+        "width": 348,
+        "height": 540,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": true,
+        "visibleOnAllWorkspaces": true,
+        "center": true,
+        "url": "panel.html",
+        "windowEffects": {
+          "effects": [
+            "popover"
+          ],
+          "state": "active",
+          "radius": 12
+        }
+      },
+      {
+        "label": "details",
         "title": "rawgpu: RX 590",
-        "width": 560,
-        "height": 640,
-        "minWidth": 420,
+        "width": 620,
+        "height": 700,
+        "minWidth": 460,
         "minHeight": 420,
         "visible": false,
-        "resizable": true
+        "resizable": true,
+        "url": "index.html",
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {
       "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
-    }
+    },
+    "macOSPrivateApi": true
   },
   "bundle": {
     "active": true,
-    "targets": ["app"],
+    "targets": [
+      "app"
+    ],
     "category": "DeveloperTool",
     "shortDescription": "RX 590 status and eject",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.png"],
-    "macOS": { "minimumSystemVersion": "13.0" }
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.png"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    }
   }
 }

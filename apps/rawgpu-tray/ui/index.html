@@ -4,53 +4,53 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>rawgpu: RX 590</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="base.css">
+  <link rel="stylesheet" href="details.css">
 </head>
 <body>
-  <header>
-    <div class="head">
-      <span id="dot" class="dot"></span>
-      <div>
-        <h1 id="headline">RX 590</h1>
-        <p id="detail" class="muted"></p>
-        <p id="user" class="muted"></p>
-      </div>
+  <header class="bar" data-tauri-drag-region>
+    <div class="bar-title" data-tauri-drag-region>
+      <span class="pill" id="pill"><span class="dot"></span><span id="pill-text">…</span></span>
+      <span id="headline" class="headline"></span>
     </div>
-    <div class="actions">
-      <button id="eject" class="primary">Eject</button>
-      <button id="up">Connect and Bring Up</button>
-      <button id="refresh" title="Read the card again">Refresh</button>
-      <button id="search">Code Search</button>
-      <button id="logs" title="~/rawgpu-index/logs">Index Logs</button>
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" data-tab="activity" aria-selected="true">Activity</button>
+      <button type="button" role="tab" data-tab="card">Card</button>
+      <button type="button" role="tab" data-tab="server">Server</button>
     </div>
   </header>
 
   <main>
-    <section>
-      <h2>Card <span id="status-age" class="muted small"></span></h2>
-      <dl id="card" class="grid"></dl>
+    <section data-panel="activity">
+      <div class="toolbar">
+        <span class="muted" id="log-count"></span>
+        <span class="tb-btns">
+          <button class="btn" id="copy-log" type="button">Copy</button>
+          <button class="btn" id="logs" type="button" title="~/rawgpu-index/logs">Index Logs</button>
+        </span>
+      </div>
+      <div class="log" id="log"></div>
     </section>
 
-    <section id="indexer-section" hidden>
-      <h2>Indexer</h2>
-      <dl id="indexer" class="grid"></dl>
+    <section data-panel="card" hidden>
+      <div class="toolbar">
+        <span class="muted" id="card-age"></span>
+        <span class="tb-btns"><button class="btn" id="refresh" type="button">Refresh</button></span>
+      </div>
+      <dl class="grid" id="card"></dl>
+      <div class="toolbar">
+        <span class="label">Full status</span>
+        <span class="tb-btns"><button class="btn" id="full" type="button">Read</button></span>
+      </div>
+      <pre class="pre" id="full-out" hidden></pre>
     </section>
 
-    <section>
-      <h2>TinyGPU server</h2>
-      <dl id="server" class="grid"></dl>
-    </section>
-
-    <section>
-      <h2>Activity</h2>
-      <pre id="log" class="log">Nothing yet.</pre>
-    </section>
-
-    <section>
-      <h2>Full status <button id="full" class="small-btn">Read</button></h2>
-      <pre id="full-out" class="log" hidden></pre>
+    <section data-panel="server" hidden>
+      <dl class="grid" id="server"></dl>
+      <div class="note">rawgpu talks to the card through the TinyGPU server, which serves one program at a time. This app looks
+        at processes to see who has the card, so it never waits behind a long job and never starts the server by itself.</div>
     </section>
   </main>
-  <script src="app.js"></script>
+  <script src="details.js"></script>
 </body>
 </html>

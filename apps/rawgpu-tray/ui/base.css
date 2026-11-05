@@ -1,0 +1,73 @@
+/* Shared by the panel and the details window. Colours: text in ink tokens; the accent is the system blue;
+   good / warning / critical are reserved for state and always come with an icon and a label. */
+:root {
+  --text: rgba(0, 0, 0, .86); --muted: rgba(0, 0, 0, .56); --faint: rgba(0, 0, 0, .36);
+  --line: rgba(0, 0, 0, .09); --line-strong: rgba(0, 0, 0, .15);
+  --tile: rgba(255, 255, 255, .55); --tile-line: rgba(0, 0, 0, .06); --hover: rgba(0, 0, 0, .05); --press: rgba(0, 0, 0, .09);
+  --panel: #ffffff; --code-bg: #fbfbfa;
+  --accent: #007aff; --accent-text: #ffffff; --accent-track: rgba(0, 122, 255, .16); --accent-soft: rgba(0, 122, 255, .1);
+  --good: #0ca30c; --good-text: #006300; --good-soft: rgba(12, 163, 12, .12); --good-track: rgba(12, 163, 12, .18);
+  --warn: #fab219; --warn-text: #8a5a00; --warn-soft: rgba(250, 178, 25, .16); --warn-track: rgba(250, 178, 25, .24);
+  --critical: #d03b3b; --critical-text: #a12424; --critical-soft: rgba(208, 59, 59, .11); --critical-track: rgba(208, 59, 59, .18);
+  --idle: rgba(0, 0, 0, .3);
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: rgba(255, 255, 255, .9); --muted: rgba(255, 255, 255, .58); --faint: rgba(255, 255, 255, .36);
+    --line: rgba(255, 255, 255, .09); --line-strong: rgba(255, 255, 255, .16);
+    --tile: rgba(255, 255, 255, .06); --tile-line: rgba(255, 255, 255, .07); --hover: rgba(255, 255, 255, .07); --press: rgba(255, 255, 255, .12);
+    --panel: #1e1f22; --code-bg: #18191b;
+    --accent: #0a84ff; --accent-track: rgba(10, 132, 255, .24); --accent-soft: rgba(10, 132, 255, .16);
+    --good-text: #3ccf3c; --good-soft: rgba(12, 163, 12, .18); --good-track: rgba(12, 163, 12, .26);
+    --warn-text: #fab219; --warn-soft: rgba(250, 178, 25, .15); --warn-track: rgba(250, 178, 25, .26);
+    --critical-text: #ff6b6b; --critical-soft: rgba(208, 59, 59, .2); --critical-track: rgba(208, 59, 59, .3);
+    --idle: rgba(255, 255, 255, .3);
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body { color: var(--text); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; -webkit-font-smoothing: antialiased;
+       user-select: none; -webkit-user-select: none; cursor: default; }
+button { font: inherit; color: inherit; cursor: default; }
+svg { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 5px 11px; border: 0; border-radius: 7px;
+       background: var(--tile); box-shadow: inset 0 0 0 .5px var(--line-strong); white-space: nowrap; }
+.btn:hover:not(:disabled) { background: var(--hover); }
+.btn:active:not(:disabled) { background: var(--press); }
+.btn:disabled { opacity: .45; }
+.btn svg { width: 15px; height: 15px; flex: none; }
+.btn.primary { background: var(--accent); color: var(--accent-text); box-shadow: none; font-weight: 600; }
+.btn.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.07); }
+.btn.big { width: 100%; padding: 9px 12px; font-size: 13.5px; border-radius: 9px; }
+.link { border: 0; background: none; padding: 0; color: var(--accent); }
+.link:hover { text-decoration: underline; }
+.label { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
+.mono { font-family: var(--mono); }
+.spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--accent-track); border-top-color: var(--accent); animation: spin .7s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* status pill: dot or icon + label, never colour alone */
+.pill { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px 2px 7px; border-radius: 999px; font-size: 12px; font-weight: 600;
+        background: var(--hover); color: var(--muted); white-space: nowrap; }
+.pill svg { width: 13px; height: 13px; stroke-width: 2; }
+.pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--idle); }
+.pill.good { background: var(--good-soft); color: var(--good-text); }
+.pill.good .dot { background: var(--good); }
+.pill.busy { background: var(--accent-soft); color: var(--accent); }
+.pill.busy .dot { background: var(--accent); }
+.pill.warn { background: var(--warn-soft); color: var(--warn-text); }
+.pill.critical { background: var(--critical-soft); color: var(--critical-text); }
+
+/* switches */
+.switch { position: relative; width: 30px; height: 18px; flex: none; }
+.switch input { position: absolute; opacity: 0; inset: 0; margin: 0; }
+.switch span { position: absolute; inset: 0; border-radius: 999px; background: var(--press); transition: background .15s; }
+.switch span::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff;
+                      box-shadow: 0 1px 2px rgba(0, 0, 0, .3); transition: transform .15s; }
+.switch input:checked + span { background: var(--accent); }
+.switch input:checked + span::after { transform: translateX(12px); }
+.switch input:disabled + span { opacity: .45; }

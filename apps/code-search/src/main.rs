@@ -144,10 +144,21 @@ async fn index_info(app: AppHandle) -> Result<Value, String> {
 }
 
 #[tauri::command]
-async fn search(app: AppHandle, query: String, backend: String, k: u32, project: Option<String>, dedupe: bool) -> Result<Value, String> {
-    let r = request(app.clone(), json!({"op": "search", "query": query, "backend": backend, "k": k,
-                                         "project": project, "dedupe": dedupe, "task": "code"}))
-        .await;
+#[allow(clippy::too_many_arguments)]
+async fn search(
+    app: AppHandle,
+    query: String,
+    backend: String,
+    k: u32,
+    projects: Vec<String>,
+    langs: Vec<String>,
+    path: Vec<String>,
+    dedupe: bool,
+    group: bool,
+) -> Result<Value, String> {
+    let req = json!({"op": "search", "query": query, "backend": backend, "k": k, "task": "code",
+                     "projects": projects, "langs": langs, "path": path, "dedupe": dedupe, "group": group});
+    let r = request(app.clone(), req).await;
     *app.state::<App>().last_error.lock().unwrap() = r.as_ref().err().cloned();
     r
 }
@@ -231,6 +242,29 @@ fn open_in_editor(path: String, line: u32, editor: String) -> Result<(), String>
     }
 }
 
+/// A source file for the preview: read-only, only under the indexed folder, at most 4 MB.
+#[tauri::command]
+async fn read_source(app: AppHandle, path: String) -> Result<Value, String> {
+    let root = app.state::<App>().ready.lock().unwrap().as_ref().and_then(|v| v["root"].as_str().map(PathBuf::from));
+    let root = root.ok_or("the index is not loaded yet")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = root.canonicalize().map_err(|e| format!("{}: {e}", root.display()))?;
+        let p = Path::new(&path).canonicalize().map_err(|_| "This file no longer exists.".to_string())?;
+        if !p.starts_with(&root) {
+            return Err(format!("{} is outside the indexed folder", p.display()));
+        }
+        let meta = std::fs::metadata(&p).map_err(|e| e.to_string())?;
+        if meta.len() > 4 << 20 {
+            return Err("This file is too large to preview.".into());
+        }
+        let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
+        let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs_f64());
+        Ok(json!({"text": String::from_utf8_lossy(&bytes), "size": meta.len(), "modified": modified}))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn reveal(path: String) -> Result<(), String> {
     Command::new("open").args(["-R", &path]).status().map(|_| ()).map_err(|e| e.to_string())
@@ -269,6 +303,7 @@ fn main() {
             editors,
             open_in_editor,
             reveal,
+            read_source,
             launch_args,
             open_log
         ])

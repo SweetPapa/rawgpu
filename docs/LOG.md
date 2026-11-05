@@ -2,6 +2,51 @@
 
 Dated, factual notes from real hardware. Newest first.
 
+## 2026-11-05: the apps, second pass
+
+**The menu bar app:**
+- **Panel:** clicking the icon opens a panel in the macOS popover material,
+  under the icon, closing when it loses focus. Right-click gives the menu.
+- **Readings:**
+  - stat tiles with meters; temperature turns amber at 8 °C below the
+    alert and red at it;
+  - a 30-minute temperature history, sampled every 10 s from
+    `status --json` while idle and from the indexer's log while it runs.
+    The line breaks where nothing could be read.
+- **Who has the card:** shown with its run time, from a new `started`
+  field in `rawgpu who --json`.
+- **Steps:** the eject and the bring-up show their steps as they happen.
+- **Notifications:** for a card reset (posted became not posted), the alert
+  temperature, indexing finishing or stopping (from the log's end record),
+  and an eject.
+- **Settings:** open at login (a LaunchAgent that runs
+  `open -g -a rawgpu.app`), and the temperature in the menu bar.
+- **Positioning:** the panel is placed in points, using the icon's own
+  display scale. This main display is 2560 × 1080 at scale 1. Using the
+  panel's own scale would misplace it on mixed-DPI setups.
+- **Tested** with an SGEMM load (45 → 73 °C) holding the card, then an
+  eject while it held it:
+  - **busy:** last readings faded, the holder card;
+  - **ejecting:** waiting on the holder, then the steps;
+  - **ejected:** safe to unplug.
+
+**Code Search:**
+- **Layout:** an overlay title bar with the search field, over the sidebar
+  material. Search as you type (320 ms debounce), with replies to stale
+  queries dropped.
+- **Results:** grouped by file in the sidecar (a pool of 600 candidate
+  chunks gathered into the top k files, up to 8 hits each), with language
+  badges and relative score meters.
+- **Filters:** project, language and path, as chips or `in:`, `lang:` and
+  `path:` tokens. The language comes from the extension, with names for the
+  Xojo, gettext, LaTeX and Xcode files that showed up as "Other".
+- **Preview:** the whole file, read only from under the index root, with
+  highlight.js (bundled, checked against two CDNs) and the matches shaded
+  on a scroll rail. A match whose lines changed is found again by its text;
+  one that is gone is left out of the navigation, with a note.
+- **Speed:** a filtered, grouped search scores 435k chunks in about 30 ms
+  once the vectors are in memory. The sidecar reads them once at startup.
+
 ## 2026-11-05: a menu bar app, Code Search, and a second-server bug
 
 **CLI for programs:**

@@ -5,8 +5,10 @@
 
 Requests (each may carry an "id", echoed in the reply):
   {"op": "info"}                       the index: chunks, files, size, projects with their chunk counts
-  {"op": "search", "query": "...", "backend": "rawgpu" | "mps" | "cpu", "k": 10,
-   "project": "rawgpu" | null, "dedupe": true, "task": "code"}
+  {"op": "search", "query": "...", "backend": "rawgpu" | "mps" | "cpu", "k": 10, "task": "code",
+   "projects": [...], "langs": ["Python", ...], "path": ["src/", ...],   (filters, each optional)
+   "dedupe": true,   (fold identical chunks from copies of a project)
+   "group": true}    (the top k files, each with its best chunks; false: the top k chunks)
   {"op": "warm", "backend": "mps"}     load a Mac backend's model now (the RX 590 is only opened by a search)
   {"op": "release"}                    close the RX 590 now
   {"op": "quit"}                       close everything and exit (so does the end of stdin)
@@ -56,6 +58,39 @@ def status(text):
     send({"event": "status", "text": text})
 
 
+LANGS = {  # file extension -> language, for filters and labels
+    "py": "Python", "pyi": "Python", "ipynb": "Python", "c": "C", "h": "C", "cc": "C++", "cpp": "C++",
+    "cxx": "C++", "hpp": "C++", "hh": "C++", "hxx": "C++", "ino": "C++", "m": "Objective-C",
+    "mm": "Objective-C", "swift": "Swift", "rs": "Rust", "go": "Go", "java": "Java", "kt": "Kotlin",
+    "kts": "Kotlin", "cs": "C#", "js": "JavaScript", "mjs": "JavaScript", "cjs": "JavaScript",
+    "jsx": "JavaScript", "ts": "TypeScript", "tsx": "TypeScript", "mts": "TypeScript", "cts": "TypeScript",
+    "vue": "Vue", "svelte": "Svelte", "html": "HTML", "htm": "HTML", "css": "CSS", "scss": "CSS",
+    "less": "CSS", "md": "Markdown", "mdx": "Markdown", "markdown": "Markdown", "rst": "Text", "txt": "Text",
+    "json": "JSON", "jsonc": "JSON", "yaml": "YAML", "yml": "YAML", "toml": "TOML", "ini": "INI", "cfg": "INI",
+    "sh": "Shell", "bash": "Shell", "zsh": "Shell", "fish": "Shell", "ps1": "PowerShell", "sql": "SQL",
+    "tf": "Terraform", "tfvars": "Terraform", "hcl": "Terraform", "gd": "GDScript", "dart": "Dart",
+    "lua": "Lua", "rb": "Ruby", "php": "PHP", "r": "R", "cl": "OpenCL", "metal": "Metal", "glsl": "Shader",
+    "hlsl": "Shader", "wgsl": "Shader", "shader": "Shader", "cmake": "CMake", "mk": "Make",
+    "proto": "Protobuf", "graphql": "GraphQL", "gql": "GraphQL", "xml": "XML", "plist": "XML", "csv": "CSV",
+    "xsd": "XML", "storyboard": "XML", "xib": "XML", "pkgproj": "XML", "xojo_code": "Xojo", "xojo_window": "Xojo",
+    "xojo_project": "Xojo", "xojo_script": "Xojo", "rbbas": "Xojo", "po": "Gettext", "pot": "Gettext",
+    "swiftinterface": "Swift", "tex": "LaTeX", "sty": "LaTeX", "bst": "LaTeX", "sol": "Solidity", "move": "Move",
+    "gradle": "Gradle", "bat": "Batch", "cmd": "Batch", "vbs": "VBScript", "nsh": "NSIS", "nsi": "NSIS",
+    "ld": "Linker script", "pbxproj": "Xcode project", "fountain": "Fountain",
+}
+NAMED = {"makefile": "Make", "gnumakefile": "Make", "dockerfile": "Dockerfile", "cmakelists.txt": "CMake",
+         "gemfile": "Ruby", "rakefile": "Ruby"}
+
+
+def lang_of(path):
+    base = path.rsplit("/", 1)[-1].lower()
+    if base in NAMED:
+        return NAMED[base]
+    if base.startswith("dockerfile"):
+        return "Dockerfile"
+    return LANGS.get(base.rsplit(".", 1)[-1] if "." in base else "", "Other")
+
+
 class Index:
     def __init__(self, out):
         self.out = out
@@ -67,13 +102,24 @@ class Index:
         self.mtime = os.path.getmtime(self.path)
         status("Loading the index vectors ...")
         self.V, self.ids = index_code.vectors(self.out, self.db)
-        rows = self.db.execute("SELECT id, project FROM chunks ORDER BY id").fetchall()
-        names = sorted({p for _, p in rows})
-        code = {p: i for i, p in enumerate(names)}
-        self.projects = names
-        self.proj = np.fromiter((code[p] for _, p in rows), np.int32, len(rows))
-        assert len(self.proj) == len(self.ids)
-        self.counts = np.bincount(self.proj, minlength=len(names))
+        rows = self.db.execute("SELECT project, path FROM chunks ORDER BY id").fetchall()
+        assert len(rows) == len(self.ids)
+        self.projects = sorted({p for p, _ in rows})
+        pcode = {p: i for i, p in enumerate(self.projects)}
+        self.files = sorted({f for _, f in rows})
+        fcode = {f: i for i, f in enumerate(self.files)}
+        self.files_lower = [f.lower() for f in self.files]
+        self.file_of = np.fromiter((fcode[f] for _, f in rows), np.int32, len(rows))  # chunk -> file
+        self.proj = np.fromiter((pcode[p] for p, _ in rows), np.int32, len(rows))     # chunk -> project
+        self.file_proj = np.zeros(len(self.files), np.int32)
+        self.file_proj[self.file_of] = self.proj
+        file_lang = [lang_of(f) for f in self.files]
+        self.langs = sorted(set(file_lang))
+        lcode = {name: i for i, name in enumerate(self.langs)}
+        self.file_lang = np.array([lcode[x] for x in file_lang], np.int32)
+        self.counts = np.bincount(self.proj, minlength=len(self.projects))
+        self.lang_counts = np.bincount(self.file_lang[self.file_of], minlength=len(self.langs))
+        self.file_chunks = np.bincount(self.file_of, minlength=len(self.files))
         threading.Thread(target=self.warm, args=(self.V,), daemon=True).start()
         root = None
         try:
@@ -94,38 +140,73 @@ class Index:
             self.load()
 
     def info(self):
-        n, files = self.db.execute("SELECT COUNT(*), COUNT(DISTINCT path) FROM chunks").fetchone()
-        return {"chunks": n, "files": files, "bytes": os.path.getsize(self.path), "root": self.root,
-                "projects": [[p, int(c)] for p, c in zip(self.projects, self.counts)]}
+        order = np.argsort(-self.lang_counts)
+        return {"chunks": int(len(self.ids)), "files": len(self.files), "bytes": os.path.getsize(self.path),
+                "root": self.root, "built": self.mtime,
+                "projects": [[p, int(c)] for p, c in zip(self.projects, self.counts)],
+                "languages": [[self.langs[i], int(self.lang_counts[i])] for i in order]}
 
-    def search(self, qv, k, project=None, dedupe=True):
+    def file_mask(self, projects=None, langs=None, path=None):
+        """Which files pass the filters (None: all of them)."""
+        if not (projects or langs or path):
+            return None
+        m = np.ones(len(self.files), bool)
+        if projects:
+            codes = [self.projects.index(p) for p in projects if p in self.projects]
+            m &= np.isin(self.file_proj, codes)
+        if langs:
+            codes = [self.langs.index(x) for x in langs if x in self.langs]
+            m &= np.isin(self.file_lang, codes)
+        if path:
+            needles = [p.lower() for p in path]
+            m &= np.fromiter((all(n in f for n in needles) for f in self.files_lower), bool, len(self.files))
+        return m
+
+    def search(self, qv, k, projects=None, langs=None, path=None, dedupe=True, group=True):
+        """The top k chunks, or with group, the top k files, each with its best-matching chunks."""
         with np.errstate(all="ignore"):  # Accelerate's sgemv raises spurious FP flags
             s = np.asarray(self.V @ qv)
-        if project:
-            if project not in self.projects:
-                return []
-            s = np.where(self.proj == self.projects.index(project), s, -2.0)
-        n = min(len(s), max(k * 8, 64))
+        fm = self.file_mask(projects, langs, path)
+        if fm is not None:
+            s = np.where(fm[self.file_of], s, -2.0)
+        n = min(len(s), max(k * 30, 600) if group else max(k * 8, 64))
         cand = np.argpartition(-s, n - 1)[:n]
         cand = cand[np.argsort(-s[cand])]
-        out, seen = [], {}
+        hits, seen, groups = [], {}, {}
         for j in cand:
             if s[j] <= -2.0:
                 break
-            path, a, b, text, tokens = self.db.execute(
-                "SELECT path, start_line, end_line, text, tokens FROM chunks WHERE id = ?", (int(self.ids[j]),)).fetchone()
+            fi = int(self.file_of[j])
+            if group and len(groups) >= k and fi not in groups:
+                continue  # enough files: only gather more matches within them
+            a, b, text, tokens = self.db.execute(
+                "SELECT start_line, end_line, text, tokens FROM chunks WHERE id = ?", (int(self.ids[j]),)).fetchone()
+            path_j = self.files[fi]
             key = hashlib.sha256(" ".join(text.split()).encode()).hexdigest()
             if dedupe and key in seen:  # the same text in another copy of a project
-                seen[key]["copies"].append(f"{path}:{a}")
+                seen[key]["copies"].append(f"{path_j}:{a}")
                 continue
-            r = {"score": float(s[j]), "path": path, "abs_path": os.path.join(self.root, path),
-                 "project": self.projects[self.proj[j]], "start": a, "end": b, "tokens": tokens, "text": text,
-                 "copies": []}
-            seen[key] = r
-            if len(out) < k:
-                out.append(r)
-            elif not dedupe:
-                break
+            hit = {"score": float(s[j]), "start": a, "end": b, "tokens": tokens, "text": text, "copies": []}
+            seen[key] = hit
+            if not group:
+                hit.update(path=path_j, abs_path=os.path.join(self.root, path_j),
+                           project=self.projects[self.proj[j]], lang=self.langs[self.file_lang[fi]])
+                hits.append(hit)
+                if len(hits) >= k:
+                    break
+                continue
+            g = groups.get(fi)
+            if g is None:
+                g = groups[fi] = {"path": path_j, "abs_path": os.path.join(self.root, path_j),
+                                  "project": self.projects[self.proj[j]], "lang": self.langs[self.file_lang[fi]],
+                                  "score": hit["score"], "file_chunks": int(self.file_chunks[fi]), "hits": []}
+            if len(g["hits"]) < 8:
+                g["hits"].append(hit)
+        if not group:
+            return hits
+        out = list(groups.values())  # already in order of each file's best chunk
+        for g in out:
+            g["copies"] = sorted({c for h in g["hits"] for c in h["copies"]})
         return out
 
 
@@ -234,10 +315,14 @@ def main():
                     t0 = time.perf_counter()
                     qv = be.embed(req["query"], backend, req.get("task", "code"))
                     t1 = time.perf_counter()
-                    res = index.search(np.asarray(qv, np.float32), int(req.get("k", 10)), req.get("project") or None,
-                                       bool(req.get("dedupe", True)))
+                    as_list = lambda v: [v] if isinstance(v, str) else (v or None)  # noqa: E731
+                    group = bool(req.get("group", True))
+                    res = index.search(np.asarray(qv, np.float32), int(req.get("k", 10)),
+                                       projects=as_list(req.get("projects") or req.get("project")),
+                                       langs=as_list(req.get("langs")), path=as_list(req.get("path")),
+                                       dedupe=bool(req.get("dedupe", True)), group=group)
                     t2 = time.perf_counter()
-                    send({"id": rid, "ok": True, "results": res, "backend": backend,
+                    send({"id": rid, "ok": True, ("groups" if group else "results"): res, "backend": backend,
                           "embed_ms": round((t1 - t0) * 1e3, 1), "search_ms": round((t2 - t1) * 1e3, 1),
                           "card_held": be.rx is not None})
                 elif op == "warm":  # load a Mac backend ahead of the first query (never the card: it is shared)

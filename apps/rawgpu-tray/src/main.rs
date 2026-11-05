@@ -1,5 +1,8 @@
 // rawgpu's menu bar app: the RX 590's state at a glance, `rawgpu eject` before unplugging, and bring-up.
 //
+// Clicking the icon opens a panel (the "panel" window, positioned under the icon, hidden when it loses
+// focus); right-clicking opens a menu. "details" is a window with the log and the full status.
+//
 // It drives the rawgpu CLI and is careful with the TinyGPU server, which serves one program at a time:
 // - It polls `rawgpu who --json`, which only inspects processes and never connects.
 // - It reads `rawgpu status --json` only while the server runs with no client, so it never queues behind
@@ -9,8 +12,9 @@
 //   while it is still waiting.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -19,14 +23,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent, Wry};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, State, WindowEvent, Wry};
+use tauri_plugin_notification::NotificationExt;
 
 /// The rawgpu checkout this app was built from; RAWGPU_BIN overrides the CLI.
 const REPO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 const POLL: Duration = Duration::from_secs(3);
+const POLL_OPEN: Duration = Duration::from_millis(1500);
 const STATUS_EVERY: Duration = Duration::from_secs(10);
+const STATUS_EVERY_OPEN: Duration = Duration::from_secs(3);
+const SAMPLE_EVERY_S: f64 = 10.0;
+const HISTORY: usize = 1080; // 3 hours at one sample per 10 s
+const PANEL_WIDTH: f64 = 348.0;
+const LAUNCH_AGENT: &str = "dev.rawgpu.tray";
 
 fn repo() -> PathBuf {
     Path::new(REPO).canonicalize().unwrap_or_else(|_| PathBuf::from(REPO))
@@ -40,8 +51,8 @@ fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+fn now_secs() -> f64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
 fn run_text(args: &[&str]) -> Result<String, String> {
@@ -111,43 +122,153 @@ fn program_name(cmd: &str) -> String {
     }
 }
 
-/// The latest progress record of a running indexer (models/embeddinggemma2/index_code.py run).
-fn indexer_progress() -> Option<Value> {
-    let dir = home().join("rawgpu-index/logs");
-    let newest = std::fs::read_dir(&dir)
+fn program_kind(cmd: &str) -> &'static str {
+    if cmd.contains("index_code.py") {
+        "indexer"
+    } else if cmd.contains("search_server.py") {
+        "search"
+    } else if cmd.split_whitespace().next().is_some_and(|w| w.ends_with("/rawgpu")) {
+        "cli"
+    } else {
+        "program"
+    }
+}
+
+/// The newest indexer log, ~/rawgpu-index/logs/run-*.jsonl.
+fn indexer_log() -> Option<PathBuf> {
+    std::fs::read_dir(home().join("rawgpu-index/logs"))
         .ok()?
         .filter_map(Result::ok)
         .filter(|e| e.file_name().to_string_lossy().starts_with("run-"))
-        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())?;
-    let mut f = std::fs::File::open(newest.path()).ok()?;
+        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
+        .map(|e| e.path())
+}
+
+/// The last record of the given kind ("progress", "end") in the newest indexer log.
+fn indexer_record(kind: &str) -> Option<Value> {
+    let mut f = std::fs::File::open(indexer_log()?).ok()?;
     let len = f.metadata().ok()?.len();
-    f.seek(SeekFrom::Start(len.saturating_sub(8192))).ok()?;
+    f.seek(SeekFrom::Start(len.saturating_sub(16384))).ok()?;
     let mut tail = String::new();
     f.read_to_string(&mut tail).ok()?;
     tail.lines()
         .rev()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .find(|v| v.get("kind").and_then(Value::as_str) == Some("progress"))
+        .find(|v| v.get("kind").and_then(Value::as_str) == Some(kind))
 }
 
-fn notify(title: &str, text: &str) {
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-    let _ = Command::new("osascript")
-        .arg("-e")
-        .arg(format!("display notification \"{}\" with title \"{}\"", esc(text), esc(title)))
-        .spawn();
+// ---------------------------------------------------------------- settings
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct Settings {
+    menu_bar_temp: bool,
+    temp_alerts: bool,
+    alert_c: i64,
+    notify_indexer: bool,
 }
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings { menu_bar_temp: false, temp_alerts: true, alert_c: 80, notify_indexer: true }
+    }
+}
+
+fn settings_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("settings.json"))
+}
+
+fn load_settings(app: &AppHandle) -> Settings {
+    settings_path(app)
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_settings(app: &AppHandle, s: &Settings) {
+    if let Some(p) = settings_path(app) {
+        let _ = std::fs::create_dir_all(p.parent().unwrap_or(Path::new("/")));
+        let _ = std::fs::write(p, serde_json::to_vec_pretty(s).unwrap_or_default());
+    }
+}
+
+/// The .app bundle this runs from, if it runs from one.
+fn app_bundle() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf)
+}
+
+fn launch_agent_path() -> PathBuf {
+    home().join(format!("Library/LaunchAgents/{LAUNCH_AGENT}.plist"))
+}
+
+fn launch_at_login() -> bool {
+    launch_agent_path().exists()
+}
+
+/// Start at login through a LaunchAgent that opens the app bundle.
+fn set_launch_at_login(on: bool) -> Result<(), String> {
+    let path = launch_agent_path();
+    if !on {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+            _ => Ok(()),
+        };
+    }
+    let app = app_bundle().ok_or("Opening at login needs the installed app: run `make install-apps`.")?;
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{LAUNCH_AGENT}</string>
+  <key>ProgramArguments</key>
+  <array><string>/usr/bin/open</string><string>-g</string><string>-a</string><string>{}</string></array>
+  <key>RunAtLoad</key><true/>
+</dict>
+</plist>
+"#,
+        esc(&app.display().to_string())
+    );
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    std::fs::write(&path, plist).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------- state
 
 #[derive(Clone, Serialize, Default)]
 struct EjectInfo {
     state: String, // "", "running", "done", "failed", "cancelled"
     phase: String,
+    step: u8, // 0 waiting, 1 stopping the engines, 2 stopping the server, 3 done
     pid: i32,
+    started: f64,
+}
+
+#[derive(Clone, Serialize)]
+struct Sample {
+    t: f64,
+    temp: i64,
+    engine: i64,
+    memory: i64,
+    fan: i64,
+    src: &'static str, // "card" (status) or "indexer" (its log)
+}
+
+#[derive(Clone, Serialize, Default)]
+struct Holder {
+    pid: i64,
+    name: String,
+    kind: String,
+    command: String,
+    started: i64,
 }
 
 #[derive(Clone, Serialize, Default)]
 struct Snapshot {
     level: String, // idle, busy, off, warn
+    mode: String,  // idle, busy, off, other, cli-error, not-posted, not-answering, reading, ejecting
     headline: String,
     detail: String,
     user: String,
@@ -157,30 +278,51 @@ struct Snapshot {
     up_enabled: bool,
     who: Option<Value>,
     who_error: Option<String>,
+    holder: Option<Holder>,
     status: Option<Value>,
     status_error: Option<String>,
-    status_at: u64,
+    status_at: f64,
     indexer: Option<Value>,
     eject: EjectInfo,
     up_running: bool,
+    up_step: String,
     log: Vec<String>,
     rawgpu: String,
+    history: Vec<Sample>,
+    settings: Settings,
+    launch_at_login: bool,
+    installed: bool,
+    now: f64,
 }
 
 struct Items {
     headline: MenuItem<Wry>,
     detail: MenuItem<Wry>,
-    user: MenuItem<Wry>,
     eject: MenuItem<Wry>,
     up: MenuItem<Wry>,
+    temp: CheckMenuItem<Wry>,
+    login: CheckMenuItem<Wry>,
+}
+
+#[derive(Default)]
+struct Watch {
+    posted: Option<bool>,
+    hot: bool,
+    indexing: bool,
 }
 
 struct Shared {
     snap: Mutex<Snapshot>,
+    history: Mutex<VecDeque<Sample>>,
     status_busy: AtomicBool,
     last_status: Mutex<Option<Instant>>,
+    last_sample: Mutex<(f64, f64)>, // (time of the last card sample, time of the last indexer record)
     items: Items,
     level: Mutex<String>,
+    title: Mutex<String>,
+    panel_hidden_at: Mutex<Option<Instant>>,
+    panel_open: AtomicBool,
+    watch: Mutex<Watch>,
 }
 
 type Sh = Arc<Shared>;
@@ -193,28 +335,53 @@ fn log_line(s: &mut Snapshot, line: impl Into<String>) {
     }
 }
 
-/// Work out what the menu shows from the latest readings.
+fn notify(app: &AppHandle, title: &str, body: &str) {
+    if app.notification().builder().title(title).body(body).show().is_err() {
+        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+        let _ = Command::new("osascript")
+            .arg("-e")
+            .arg(format!("display notification \"{}\" with title \"{}\"", esc(body), esc(title)))
+            .spawn();
+    }
+}
+
+fn push_sample(sh: &Shared, smp: Sample) {
+    let mut h = sh.history.lock().unwrap();
+    h.push_back(smp);
+    while h.len() > HISTORY {
+        h.pop_front();
+    }
+}
+
+/// Work out what the panel and the menu show from the latest readings.
 fn derive(s: &mut Snapshot) {
     let who = s.who.clone().unwrap_or(Value::Null);
     let server = int(&who, "server_pid");
     let clients = int(&who, "client_count");
     let others = int(&who, "other_tinygpu");
-    let holder = who
-        .get("clients")
-        .and_then(Value::as_array)
-        .and_then(|c| c.first())
-        .map(|c| (program_name(c.get("command").and_then(Value::as_str).unwrap_or("")), int(c, "pid")));
-    let holder_text = match &holder {
-        Some((name, pid)) => format!("{name} (pid {pid})"),
+    s.holder = who.get("clients").and_then(Value::as_array).and_then(|c| c.first()).map(|c| {
+        let cmd = c.get("command").and_then(Value::as_str).unwrap_or("");
+        Holder {
+            pid: int(c, "pid"),
+            name: program_name(cmd),
+            kind: program_kind(cmd).into(),
+            command: cmd.split_whitespace().collect::<Vec<_>>().join(" "),
+            started: int(c, "started"),
+        }
+    });
+    let holder_text = match &s.holder {
+        Some(h) => format!("{} (pid {})", h.name, h.pid),
         None => "another program".into(),
     };
     s.eject_label = "Eject: Make Safe to Unplug".into();
     s.eject_enabled = server > 0;
     s.up_label = "Connect and Bring Up Card".into();
     s.up_enabled = !s.up_running && clients == 0;
+    s.now = now_secs();
 
     if s.eject.state == "running" {
         s.level = "busy".into();
+        s.mode = "ejecting".into();
         s.headline = "RX 590: ejecting".into();
         s.detail = s.eject.phase.clone();
         s.user = if clients > 0 { format!("Waiting for {holder_text} to finish") } else { "Closing the card".into() };
@@ -225,6 +392,7 @@ fn derive(s: &mut Snapshot) {
     }
     if let Some(e) = &s.who_error {
         s.level = "warn".into();
+        s.mode = "cli-error".into();
         s.headline = "rawgpu CLI not working".into();
         s.detail = e.lines().next().unwrap_or("").chars().take(90).collect();
         s.user = format!("Expected at {}", s.rawgpu);
@@ -234,42 +402,38 @@ fn derive(s: &mut Snapshot) {
     }
     if server == 0 {
         s.status = None;
+        s.user = "Nothing is using the card".into();
+        s.eject_enabled = false;
         if others > 0 {
             s.level = "warn".into();
-            s.headline = "RX 590: another TinyGPU server is running".into();
+            s.mode = "other".into();
+            s.headline = "RX 590: another TinyGPU server".into();
             s.detail = "Another program may have the card. Not safe to unplug.".into();
-            s.user = "rawgpu's own server is not running".into();
         } else {
             s.level = "off".into();
+            s.mode = "off".into();
             s.headline = "RX 590: not connected".into();
-            s.detail = if s.eject.state == "done" {
-                "Ejected. Safe to unplug.".into()
-            } else {
-                "No TinyGPU server. Safe to unplug.".into()
-            };
-            s.user = "Nothing is using the card".into();
+            s.detail = if s.eject.state == "done" { "Ejected. Safe to unplug.".into() } else { "Safe to unplug.".into() };
         }
-        s.eject_enabled = false;
-        s.up_label = "Connect and Bring Up Card".into();
         return;
     }
     if clients > 0 {
         s.level = "busy".into();
-        s.headline = "RX 590: in use".into();
+        s.mode = "busy".into();
+        s.headline = format!("RX 590: in use by {}", s.holder.as_ref().map_or("another program", |h| h.name.as_str()));
         s.user = format!("In use by {holder_text}");
         s.detail = match &s.indexer {
             Some(p) => format!(
-                "Indexing {:.1} chunks/s, {} °C, fan {}%, {} chunks",
+                "Indexing {:.1} chunks/s, {} °C, fan {}%",
                 p.get("chunks_per_s").and_then(Value::as_f64).unwrap_or(0.0),
                 int(p, "temperature_c"),
                 int(p, "fan_percent"),
-                thousands(int(p, "chunks_embedded"))
             ),
-            None => "Card readings pause while another program has the card".into(),
+            None => "Readings pause while another program has the card".into(),
         };
-        s.eject_label = match &holder {
-            Some((name, _)) => format!("Eject: Waits for {name}…"),
-            None => "Eject: Waits for the Card to Be Free…".into(),
+        s.eject_label = match &s.holder {
+            Some(h) => format!("Eject: Wait for {}…", h.name),
+            None => "Eject: Wait for the Card…".into(),
         };
         s.up_enabled = false;
         return;
@@ -278,36 +442,39 @@ fn derive(s: &mut Snapshot) {
     match (&s.status, &s.status_error) {
         (_, Some(e)) => {
             s.level = "warn".into();
+            s.mode = "not-answering".into();
             s.headline = "RX 590: not answering".into();
             s.detail = e.lines().next().unwrap_or("").chars().take(90).collect();
         }
         (None, None) => {
             s.level = "idle".into();
+            s.mode = "reading".into();
             s.headline = "RX 590: reading the card…".into();
             s.detail = String::new();
         }
         (Some(st), None) => {
-            let posted = st.get("posted").and_then(Value::as_bool).unwrap_or(false);
-            if !posted {
+            if !st.get("posted").and_then(Value::as_bool).unwrap_or(false) {
                 s.level = "warn".into();
+                s.mode = "not-posted".into();
                 s.headline = "RX 590: needs bring-up".into();
-                s.detail = "Not posted: the card lost power or the Mac slept".into();
+                s.detail = "The card was reset: it lost power or the Mac slept".into();
                 s.up_label = "Bring Up Card".into();
                 return;
             }
             let dpm = st.get("engine_dpm").and_then(Value::as_bool).unwrap_or(false);
             let fan = int(st, "fan_percent");
             s.level = "idle".into();
+            s.mode = "idle".into();
             s.headline = format!(
                 "RX 590: idle, {} °C{}",
                 int(st, "temperature_c"),
                 if fan >= 0 { format!(", fan {fan}%") } else { String::new() }
             );
             s.detail = format!(
-                "Engine {} MHz, memory {} MHz, DPM {}",
+                "Engine {} MHz, memory {} MHz{}",
                 int(st, "engine_mhz"),
                 int(st, "memory_mhz"),
-                if dpm { "on" } else { "off (boot clocks)" }
+                if dpm { "" } else { ", DPM off" }
             );
             s.up_label = "Card Is Up".into();
             s.up_enabled = false;
@@ -324,24 +491,41 @@ fn icon_for(level: &str) -> &'static [u8] {
     }
 }
 
-/// Push the snapshot to the menu, the icon and the details window.
+/// The temperature beside the icon, when the setting is on.
+fn tray_title(s: &Snapshot) -> String {
+    if !s.settings.menu_bar_temp {
+        return String::new();
+    }
+    let t = match (&s.status, &s.indexer, s.mode.as_str()) {
+        (_, Some(p), "busy") => Some(int(p, "temperature_c")),
+        (Some(st), _, "idle") => Some(int(st, "temperature_c")),
+        _ => None,
+    };
+    t.map(|t| format!("{t}°")).unwrap_or_default()
+}
+
+/// Push the snapshot to the menu, the icon and the windows.
 fn refresh(app: &AppHandle, sh: &Shared) {
     let snap = {
         let mut s = sh.snap.lock().unwrap();
         derive(&mut s);
+        s.launch_at_login = launch_at_login();
+        s.installed = app_bundle().is_some();
+        s.history = sh.history.lock().unwrap().iter().cloned().collect();
         s.clone()
     };
+    // No lock may be held across a tray or menu call: they run on the main thread, which may itself be
+    // waiting in refresh().
     let it = &sh.items;
     let _ = it.headline.set_text(&snap.headline);
-    let _ = it.detail.set_text(if snap.detail.is_empty() { " " } else { &snap.detail });
-    let _ = it.user.set_text(&snap.user);
+    let _ = it.detail.set_text(if snap.detail.is_empty() { &snap.user } else { &snap.detail });
     let _ = it.eject.set_text(&snap.eject_label);
     let _ = it.eject.set_enabled(snap.eject_enabled);
     let _ = it.up.set_text(&snap.up_label);
     let _ = it.up.set_enabled(snap.up_enabled);
+    let _ = it.temp.set_checked(snap.settings.menu_bar_temp);
+    let _ = it.login.set_checked(snap.launch_at_login);
     if let Some(tray) = app.tray_by_id("main") {
-        // No lock may be held across a tray or menu call: they run on the main thread, which may itself
-        // be waiting in refresh().
         let changed = {
             let mut level = sh.level.lock().unwrap();
             let changed = *level != snap.level;
@@ -354,9 +538,79 @@ fn refresh(app: &AppHandle, sh: &Shared) {
                 let _ = tray.set_icon_as_template(true);
             }
         }
+        let title = tray_title(&snap);
+        let title_changed = {
+            let mut t = sh.title.lock().unwrap();
+            let c = *t != title;
+            *t = title.clone();
+            c
+        };
+        if title_changed {
+            let _ = tray.set_title(if title.is_empty() { None } else { Some(title.as_str()) });
+        }
         let _ = tray.set_tooltip(Some(&snap.headline));
     }
     let _ = app.emit("state", &snap);
+}
+
+/// Alerts that need the history of the readings: a card reset, high temperature, the indexer ending.
+fn watch(app: &AppHandle, sh: &Shared) {
+    let (posted, temp, indexing, settings) = {
+        let s = sh.snap.lock().unwrap();
+        let posted = s.status.as_ref().and_then(|st| st.get("posted")).and_then(Value::as_bool);
+        let temp = match (&s.indexer, &s.status) {
+            (Some(p), _) if s.mode == "busy" => Some(int(p, "temperature_c")),
+            (_, Some(st)) if posted == Some(true) => Some(int(st, "temperature_c")),
+            _ => None,
+        };
+        let indexing = s.holder.as_ref().is_some_and(|h| h.kind == "indexer");
+        (posted, temp, indexing, s.settings.clone())
+    };
+    let mut alerts: Vec<(String, String)> = vec![];
+    {
+        let mut w = sh.watch.lock().unwrap();
+        if let Some(p) = posted {
+            if w.posted == Some(true) && !p {
+                alerts.push((
+                    "RX 590 was reset".into(),
+                    "It lost power or the Mac slept. Choose Bring Up Card in the menu bar.".into(),
+                ));
+            }
+            w.posted = Some(p);
+        }
+        if let Some(t) = temp {
+            if settings.temp_alerts && !w.hot && t >= settings.alert_c {
+                alerts.push((format!("RX 590 at {t} °C"), format!("The card reached your {} °C alert.", settings.alert_c)));
+                w.hot = true;
+            } else if t < settings.alert_c - 5 {
+                w.hot = false;
+            }
+        }
+        if w.indexing && !indexing && settings.notify_indexer {
+            let end = indexer_record("end");
+            let (title, body) = match end {
+                Some(e) if e.get("ok").and_then(Value::as_bool) == Some(true) => (
+                    "Indexing finished".to_string(),
+                    format!(
+                        "{} chunks embedded in {:.1} h; the index has {} chunks.",
+                        thousands(int(&e, "chunks_embedded")),
+                        e.get("wall_s").and_then(Value::as_f64).unwrap_or(0.0) / 3600.0,
+                        thousands(int(&e, "index_chunks"))
+                    ),
+                ),
+                Some(e) => (
+                    "Indexing stopped".to_string(),
+                    e.get("stop_reason").and_then(Value::as_str).unwrap_or("see its log").to_string(),
+                ),
+                None => ("The indexer exited".to_string(), "It did not finish. Run it again to resume.".to_string()),
+            };
+            alerts.push((title, body));
+        }
+        w.indexing = indexing;
+    }
+    for (t, b) in alerts {
+        notify(app, &t, &b);
+    }
 }
 
 fn read_status(app: &AppHandle, sh: &Sh) {
@@ -371,9 +625,24 @@ fn read_status(app: &AppHandle, sh: &Sh) {
             let mut s = sh.snap.lock().unwrap();
             match r {
                 Ok(v) => {
+                    let t = now_secs();
+                    if v.get("posted").and_then(Value::as_bool) == Some(true) {
+                        let mut last = sh.last_sample.lock().unwrap();
+                        if t - last.0 >= SAMPLE_EVERY_S {
+                            last.0 = t;
+                            push_sample(&sh, Sample {
+                                t,
+                                temp: int(&v, "temperature_c"),
+                                engine: int(&v, "engine_mhz"),
+                                memory: int(&v, "memory_mhz"),
+                                fan: int(&v, "fan_percent"),
+                                src: "card",
+                            });
+                        }
+                    }
                     s.status = Some(v);
                     s.status_error = None;
-                    s.status_at = now_secs();
+                    s.status_at = t;
                 }
                 Err(e) => s.status_error = Some(e),
             }
@@ -381,11 +650,13 @@ fn read_status(app: &AppHandle, sh: &Sh) {
         *sh.last_status.lock().unwrap() = Some(Instant::now());
         sh.status_busy.store(false, Ordering::SeqCst);
         refresh(&app, &sh);
+        watch(&app, &sh);
     });
 }
 
 fn poll_once(app: &AppHandle, sh: &Sh) {
     let who = run_json(&["who", "--json"]);
+    let open = sh.panel_open.load(Ordering::SeqCst);
     let need_status = {
         let mut s = sh.snap.lock().unwrap();
         match who {
@@ -406,17 +677,34 @@ fn poll_once(app: &AppHandle, sh: &Sh) {
             .and_then(Value::as_array)
             .map(|c| c.iter().any(|c| c.get("command").and_then(Value::as_str).unwrap_or("").contains("index_code.py")))
             .unwrap_or(false);
-        s.indexer = if indexing { indexer_progress() } else { None };
+        s.indexer = if indexing { indexer_record("progress") } else { None };
+        if let Some(p) = &s.indexer {
+            let t = p.get("t").and_then(Value::as_f64).unwrap_or(0.0);
+            let mut last = sh.last_sample.lock().unwrap();
+            if t > last.1 {
+                last.1 = t;
+                push_sample(sh, Sample {
+                    t,
+                    temp: int(p, "temperature_c"),
+                    engine: int(p, "engine_mhz"),
+                    memory: int(p, "memory_mhz"),
+                    fan: int(p, "fan_percent"),
+                    src: "indexer",
+                });
+            }
+        }
         if server == 0 {
             s.status_error = None;
         }
-        let stale = sh.last_status.lock().unwrap().map_or(true, |t| t.elapsed() >= STATUS_EVERY);
+        let every = if open { STATUS_EVERY_OPEN } else { STATUS_EVERY };
+        let stale = sh.last_status.lock().unwrap().map_or(true, |t| t.elapsed() >= every);
         server > 0 && clients == 0 && s.eject.state != "running" && !s.up_running && stale
     };
     if need_status {
         read_status(app, sh);
     }
     refresh(app, sh);
+    watch(app, sh);
 }
 
 fn start_eject(app: &AppHandle, sh: &Sh) {
@@ -425,7 +713,7 @@ fn start_eject(app: &AppHandle, sh: &Sh) {
         if s.eject.state == "running" {
             return;
         }
-        s.eject = EjectInfo { state: "running".into(), phase: "Starting".into(), pid: 0 };
+        s.eject = EjectInfo { state: "running".into(), phase: "Starting".into(), step: 0, pid: 0, started: now_secs() };
         log_line(&mut s, "$ rawgpu eject");
     }
     let child = Command::new(rawgpu_bin())
@@ -438,7 +726,7 @@ fn start_eject(app: &AppHandle, sh: &Sh) {
         Ok(c) => c,
         Err(e) => {
             let mut s = sh.snap.lock().unwrap();
-            s.eject = EjectInfo { state: "failed".into(), phase: format!("could not run rawgpu: {e}"), pid: 0 };
+            s.eject = EjectInfo { state: "failed".into(), phase: format!("could not run rawgpu: {e}"), ..Default::default() };
             drop(s);
             refresh(app, sh);
             return;
@@ -463,19 +751,20 @@ fn start_eject(app: &AppHandle, sh: &Sh) {
         if let Some(out) = child.stdout.take() {
             for line in BufReader::new(out).lines().map_while(Result::ok) {
                 let mut s = sh.snap.lock().unwrap();
-                let phase = if line.starts_with("Another program is using the card") {
-                    Some("Waiting for the card to be free")
+                let phase = if line.starts_with("Another program is using the card") || line.contains("still waiting") {
+                    Some(("Waiting for the card to be free", 0))
                 } else if line.starts_with("The card is free") || line.starts_with("TinyGPU server: pid") {
-                    Some("Stopping the card's engines")
+                    Some(("Stopping the card's engines", 1))
+                } else if line.starts_with("GPU:") {
+                    Some(("Stopping the TinyGPU server", 2))
                 } else if line.starts_with("TinyGPU server: stopped") {
-                    Some("TinyGPU server stopped")
-                } else if line.contains("still waiting") {
-                    Some("Still waiting for the card")
+                    Some(("TinyGPU server stopped", 3))
                 } else {
                     None
                 };
-                if let Some(p) = phase {
+                if let Some((p, step)) = phase {
                     s.eject.phase = p.into();
+                    s.eject.step = step;
                 }
                 log_line(&mut s, line);
                 drop(s);
@@ -485,25 +774,34 @@ fn start_eject(app: &AppHandle, sh: &Sh) {
         let status = child.wait();
         let mut s = sh.snap.lock().unwrap();
         let last = s.log.iter().rev().find(|l| !l.trim().is_empty()).cloned().unwrap_or_default();
-        match status {
+        let started = s.eject.started;
+        let notice = match status {
             Ok(st) if st.success() => {
-                s.eject = EjectInfo { state: "done".into(), phase: "Safe to unplug".into(), pid: 0 };
+                s.eject = EjectInfo { state: "done".into(), phase: "Safe to unplug".into(), step: 3, pid: 0, started };
                 s.status = None;
-                notify("RX 590 ejected", "Safe to unplug. The next rawgpu program reconnects.");
+                Some(("RX 590 ejected".to_string(), "Safe to unplug. Connect again from the menu bar.".to_string()))
             }
             Ok(st) if st.signal().is_some() => {
-                s.eject = EjectInfo { state: "cancelled".into(), phase: "Eject cancelled; nothing changed".into(), pid: 0 };
+                s.eject = EjectInfo { state: "cancelled".into(), phase: "Eject cancelled; nothing changed".into(), ..Default::default() };
+                None
             }
             Ok(_) => {
-                s.eject = EjectInfo { state: "failed".into(), phase: last.clone(), pid: 0 };
-                notify("RX 590: not safe to unplug", &last);
+                s.eject = EjectInfo { state: "failed".into(), phase: last.clone(), ..Default::default() };
+                Some(("RX 590: not safe to unplug".to_string(), last.clone()))
             }
-            Err(e) => s.eject = EjectInfo { state: "failed".into(), phase: e.to_string(), pid: 0 },
-        }
+            Err(e) => {
+                s.eject = EjectInfo { state: "failed".into(), phase: e.to_string(), ..Default::default() };
+                None
+            }
+        };
         let done = format!("[eject {}]", s.eject.state);
         log_line(&mut s, done);
         drop(s);
         *sh.last_status.lock().unwrap() = None;
+        sh.watch.lock().unwrap().posted = None; // an eject is not a reset
+        if let Some((t, b)) = notice {
+            notify(&app, &t, &b);
+        }
         refresh(&app, &sh);
     });
 }
@@ -526,6 +824,7 @@ fn bring_up(app: &AppHandle, sh: &Sh) {
             return;
         }
         s.up_running = true;
+        s.up_step = "Connecting".into();
         log_line(&mut s, "$ rawgpu up");
     }
     refresh(app, sh);
@@ -550,7 +849,13 @@ fn bring_up(app: &AppHandle, sh: &Sh) {
                 });
                 if let Some(o) = c.stdout.take() {
                     for l in BufReader::new(o).lines().map_while(Result::ok) {
-                        log_line(&mut sh.snap.lock().unwrap(), l);
+                        {
+                            let mut s = sh.snap.lock().unwrap();
+                            if let Some(step) = l.strip_prefix("rawgpu: bring-up: ") {
+                                s.up_step = step.trim().to_string();
+                            }
+                            log_line(&mut s, l);
+                        }
                         refresh(&app, &sh);
                     }
                 }
@@ -565,25 +870,82 @@ fn bring_up(app: &AppHandle, sh: &Sh) {
         {
             let mut s = sh.snap.lock().unwrap();
             s.up_running = false;
+            s.up_step.clear();
             if s.eject.state == "done" {
                 s.eject = EjectInfo::default();
             }
             log_line(&mut s, if ok { "[up done]" } else { "[up failed]" });
         }
         if !ok {
-            notify("RX 590: bring-up failed", "See the details window for rawgpu's messages.");
+            notify(&app, "RX 590: bring-up failed", "Open Details from the menu bar for rawgpu's messages.");
         }
         *sh.last_status.lock().unwrap() = None;
         poll_once(&app, &sh);
     });
 }
 
-fn show_window(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
+// ---------------------------------------------------------------- windows
+
+fn show_details(app: &AppHandle) {
+    hide_panel(app);
+    if let Some(w) = app.get_webview_window("details") {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
     }
+}
+
+fn hide_panel(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("panel") {
+        if w.is_visible().unwrap_or(false) {
+            let _ = w.hide();
+        }
+    }
+}
+
+/// Open the panel under the tray icon (or close it). `rect` is the icon's rectangle on screen.
+fn toggle_panel(app: &AppHandle, rect: Option<tauri::Rect>) {
+    let Some(w) = app.get_webview_window("panel") else { return };
+    let sh = app.state::<Sh>().inner().clone();
+    if w.is_visible().unwrap_or(false) {
+        let _ = w.hide();
+        return;
+    }
+    // A click on the icon while the panel is open first takes its focus away, which hides it; don't
+    // reopen it straight away.
+    if sh.panel_hidden_at.lock().unwrap().is_some_and(|t| t.elapsed() < Duration::from_millis(300)) {
+        return;
+    }
+    if let Some(r) = rect {
+        // The icon's rectangle is in its display's pixels. Work in points (macOS's global window
+        // coordinates), with the scale of the display the icon is on, which may differ from the panel's.
+        let guess = w.scale_factor().unwrap_or(1.0);
+        let p0 = r.position.to_physical::<f64>(guess);
+        let mon = app.monitor_from_point(p0.x, p0.y).ok().flatten();
+        let scale = mon.as_ref().map_or(guess, |m| m.scale_factor());
+        let pos = r.position.to_logical::<f64>(scale);
+        let size = r.size.to_logical::<f64>(scale);
+        let mut x = pos.x + size.width / 2.0 - PANEL_WIDTH / 2.0;
+        if let Some(m) = mon {
+            let left = m.position().x as f64 / scale + 8.0;
+            let right = (m.position().x as f64 + m.size().width as f64) / scale - PANEL_WIDTH - 8.0;
+            x = x.clamp(left, right.max(left));
+        }
+        let _ = w.set_position(tauri::LogicalPosition::new(x, pos.y + size.height + 4.0));
+    }
+    sh.panel_open.store(true, Ordering::SeqCst);
+    let _ = w.show();
+    let _ = w.set_focus();
+    let (app2, sh2) = (app.clone(), sh.clone());
+    std::thread::spawn(move || {
+        *sh2.last_status.lock().unwrap() = None; // fresh readings for the open panel
+        poll_once(&app2, &sh2);
+    });
+}
+
+/// Debug builds only: RAWGPU_PIN_PANEL=1 keeps the panel open when it loses focus (for screenshots).
+fn pinned() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("RAWGPU_PIN_PANEL").is_some()
 }
 
 fn open_search() {
@@ -595,10 +957,16 @@ fn open_search() {
     }
 }
 
+// ---------------------------------------------------------------- commands
+
 #[tauri::command]
-fn get_state(sh: State<'_, Sh>) -> Snapshot {
+fn get_state(app: AppHandle, sh: State<'_, Sh>) -> Snapshot {
     let mut s = sh.snap.lock().unwrap();
     derive(&mut s);
+    s.launch_at_login = launch_at_login();
+    s.installed = app_bundle().is_some();
+    s.history = sh.history.lock().unwrap().iter().cloned().collect();
+    let _ = app;
     s.clone()
 }
 
@@ -624,6 +992,40 @@ fn refresh_now(app: AppHandle, sh: State<'_, Sh>) {
     std::thread::spawn(move || poll_once(&app, &sh));
 }
 
+#[tauri::command]
+fn dismiss(app: AppHandle, sh: State<'_, Sh>) {
+    // forget a finished, failed or cancelled eject
+    {
+        let mut s = sh.snap.lock().unwrap();
+        if s.eject.state != "running" {
+            s.eject = EjectInfo::default();
+        }
+    }
+    refresh(&app, &sh);
+}
+
+#[tauri::command]
+fn set_setting(app: AppHandle, sh: State<'_, Sh>, key: String, value: Value) -> Result<(), String> {
+    if key == "launch_at_login" {
+        set_launch_at_login(value.as_bool().unwrap_or(false))?;
+    } else {
+        let settings = {
+            let mut s = sh.snap.lock().unwrap();
+            match key.as_str() {
+                "menu_bar_temp" => s.settings.menu_bar_temp = value.as_bool().unwrap_or(false),
+                "temp_alerts" => s.settings.temp_alerts = value.as_bool().unwrap_or(true),
+                "notify_indexer" => s.settings.notify_indexer = value.as_bool().unwrap_or(true),
+                "alert_c" => s.settings.alert_c = value.as_i64().unwrap_or(80).clamp(50, 95),
+                _ => return Err(format!("unknown setting {key}")),
+            }
+            s.settings.clone()
+        };
+        save_settings(&app, &settings);
+    }
+    refresh(&app, &sh);
+    Ok(())
+}
+
 /// `rawgpu status` in full, only while the server runs and nothing has the card.
 #[tauri::command]
 async fn full_status() -> Result<String, String> {
@@ -644,52 +1046,91 @@ async fn full_status() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn open_code_search() {
+fn fit_panel(app: AppHandle, height: f64) {
+    if let Some(w) = app.get_webview_window("panel") {
+        let _ = w.set_size(LogicalSize::new(PANEL_WIDTH, height.clamp(200.0, 900.0)));
+    }
+}
+
+#[tauri::command]
+fn close_panel(app: AppHandle) {
+    hide_panel(&app);
+}
+
+#[tauri::command]
+fn open_details(app: AppHandle) {
+    show_details(&app);
+}
+
+#[tauri::command]
+fn open_code_search(app: AppHandle) {
+    hide_panel(&app);
     open_search();
 }
 
 #[tauri::command]
-fn open_logs() {
+fn open_logs(app: AppHandle) {
+    hide_panel(&app);
     let _ = Command::new("open").arg(home().join("rawgpu-index/logs")).status();
+}
+
+#[tauri::command]
+fn quit(app: AppHandle) {
+    app.exit(0);
 }
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            let settings = load_settings(app.handle());
 
             let headline = MenuItem::with_id(app, "headline", "RX 590", false, None::<&str>)?;
             let detail = MenuItem::with_id(app, "detail", " ", false, None::<&str>)?;
-            let user = MenuItem::with_id(app, "user", " ", false, None::<&str>)?;
             let eject = MenuItem::with_id(app, "eject", "Eject: Make Safe to Unplug", false, None::<&str>)?;
             let up = MenuItem::with_id(app, "up", "Connect and Bring Up Card", false, None::<&str>)?;
-            let details = MenuItem::with_id(app, "details", "Show Details…", true, None::<&str>)?;
-            let search = MenuItem::with_id(app, "search", "Open Code Search", true, None::<&str>)?;
+            let details = MenuItem::with_id(app, "details", "Details…", true, None::<&str>)?;
+            let search = MenuItem::with_id(app, "search", "Code Search", true, None::<&str>)?;
+            let temp = CheckMenuItem::with_id(app, "temp", "Show Temperature in Menu Bar", true, settings.menu_bar_temp, None::<&str>)?;
+            let login = CheckMenuItem::with_id(app, "login", "Open at Login", true, launch_at_login(), None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit rawgpu", true, Some("CmdOrCtrl+Q"))?;
             let menu = Menu::with_items(
                 app,
                 &[
                     &headline,
                     &detail,
-                    &user,
                     &PredefinedMenuItem::separator(app)?,
                     &eject,
                     &up,
                     &PredefinedMenuItem::separator(app)?,
-                    &details,
                     &search,
+                    &details,
+                    &PredefinedMenuItem::separator(app)?,
+                    &temp,
+                    &login,
                     &PredefinedMenuItem::separator(app)?,
                     &quit,
                 ],
             )?;
 
             let sh: Sh = Arc::new(Shared {
-                snap: Mutex::new(Snapshot { rawgpu: rawgpu_bin().display().to_string(), ..Default::default() }),
+                snap: Mutex::new(Snapshot {
+                    rawgpu: rawgpu_bin().display().to_string(),
+                    settings,
+                    ..Default::default()
+                }),
+                history: Mutex::new(VecDeque::new()),
                 status_busy: AtomicBool::new(false),
                 last_status: Mutex::new(None),
-                items: Items { headline, detail, user, eject, up },
+                last_sample: Mutex::new((0.0, 0.0)),
+                items: Items { headline, detail, eject, up, temp, login },
                 level: Mutex::new(String::new()),
+                title: Mutex::new(String::new()),
+                panel_hidden_at: Mutex::new(None),
+                panel_open: AtomicBool::new(false),
+                watch: Mutex::new(Watch::default()),
             });
             app.manage(sh.clone());
 
@@ -699,7 +1140,12 @@ fn main() {
                 .icon_as_template(true)
                 .tooltip("rawgpu")
                 .menu(&menu)
-                .show_menu_on_left_click(true)
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, rect, .. } = event {
+                        toggle_panel(tray.app_handle(), Some(rect));
+                    }
+                })
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "eject" => {
                         if menu_sh.snap.lock().unwrap().eject.state == "running" {
@@ -709,34 +1155,55 @@ fn main() {
                         }
                     }
                     "up" => bring_up(app, &menu_sh),
-                    "details" => show_window(app),
+                    "details" => show_details(app),
                     "search" => open_search(),
+                    "temp" => {
+                        let on = !menu_sh.snap.lock().unwrap().settings.menu_bar_temp;
+                        let _ = set_setting(app.clone(), app.state::<Sh>(), "menu_bar_temp".into(), Value::Bool(on));
+                    }
+                    "login" => {
+                        if let Err(e) = set_setting(app.clone(), app.state::<Sh>(), "launch_at_login".into(), Value::Bool(!launch_at_login())) {
+                            notify(app, "Open at Login", &e);
+                        }
+                    }
                     "quit" => app.exit(0),
                     _ => {}
                 })
                 .build(app)?;
 
-            #[cfg(debug_assertions)] // for testing without clicking: --test-eject-after SECONDS
-            if let Some(secs) = std::env::args().skip_while(|a| a != "--test-eject-after").nth(1).and_then(|s| s.parse().ok()) {
-                let (h, s2) = (app.handle().clone(), sh.clone());
-                std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_secs(secs));
-                    start_eject(&h, &s2);
-                });
+            #[cfg(debug_assertions)] // for testing without clicking: --test-eject-after SECONDS, --show-panel
+            {
+                if let Some(secs) = std::env::args().skip_while(|a| a != "--test-eject-after").nth(1).and_then(|s| s.parse().ok()) {
+                    let (h, s2) = (app.handle().clone(), sh.clone());
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_secs(secs));
+                        start_eject(&h, &s2);
+                    });
+                }
             }
 
             let handle = app.handle().clone();
             std::thread::spawn(move || loop {
                 poll_once(&handle, &sh);
-                std::thread::sleep(POLL);
+                let open = sh.panel_open.load(Ordering::SeqCst);
+                std::thread::sleep(if open { POLL_OPEN } else { POLL });
             });
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(|window, event| match event {
+            WindowEvent::CloseRequested { api, .. } => {
                 let _ = window.hide(); // the app lives in the menu bar
                 api.prevent_close();
             }
+            WindowEvent::Focused(false) if window.label() == "panel" && !pinned() => {
+                // like a menu: the panel goes away when you click elsewhere
+                let app = window.app_handle();
+                let sh = app.state::<Sh>();
+                *sh.panel_hidden_at.lock().unwrap() = Some(Instant::now());
+                sh.panel_open.store(false, Ordering::SeqCst);
+                let _ = window.hide();
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
@@ -744,17 +1211,40 @@ fn main() {
             cancel,
             up,
             refresh_now,
+            dismiss,
+            set_setting,
             full_status,
+            fit_panel,
+            close_panel,
+            open_details,
             open_code_search,
-            open_logs
+            open_logs,
+            quit
         ])
         .build(tauri::generate_context!())
         .expect("error while starting the rawgpu menu bar app")
         .run(|app, event| match event {
-            // opening the app again (Finder, Spotlight, `open -a rawgpu`) shows its window
+            // opening the app again (Finder, Spotlight, `open -a rawgpu`) shows the details window
             #[cfg(target_os = "macos")]
-            tauri::RunEvent::Reopen { .. } => show_window(app),
-            tauri::RunEvent::Ready if std::env::args().any(|a| a == "--show") => show_window(app),
+            tauri::RunEvent::Reopen { .. } => show_details(app),
+            tauri::RunEvent::Ready => {
+                if std::env::args().any(|a| a == "--show") {
+                    show_details(app);
+                }
+                if std::env::args().any(|a| a == "--show-panel") {
+                    toggle_panel(app, None);
+                }
+                #[cfg(debug_assertions)] // --show-panel-at X,Y,W,H: as if the icon at that physical rectangle were clicked
+                if let Some(r) = std::env::args().skip_while(|a| a != "--show-panel-at").nth(1) {
+                    let v: Vec<f64> = r.split(',').filter_map(|x| x.parse().ok()).collect();
+                    if v.len() == 4 {
+                        toggle_panel(app, Some(tauri::Rect {
+                            position: tauri::Position::Physical(PhysicalPosition::new(v[0] as i32, v[1] as i32)),
+                            size: tauri::Size::Physical(tauri::PhysicalSize::new(v[2] as u32, v[3] as u32)),
+                        }));
+                    }
+                }
+            }
             _ => {}
         });
 }
