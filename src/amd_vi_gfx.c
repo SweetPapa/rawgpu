@@ -494,10 +494,12 @@ static uint32_t cq_emit_fence(vi_cq *q) {
 }
 
 int vi_cq_wait(vi_cq *q, uint32_t seq, unsigned timeout_ms) {
-  double end = vi_now() + timeout_ms / 1e3;
+  double began = vi_now(), end = began + timeout_ms / 1e3;
   uint32_t f;
+  unsigned round = 0;
   while ((int32_t)((f = vi_mem_read32(q->v, &q->wb, VI_CQ_WB_FENCE)) - seq) < 0) {
     if (q->v->err) return q->v->err;
+    if (q->wb.cpu) vi_poll_pause(began, &round); /* host writeback: looking is free, so do not spin */
     if (vi_now() > end) {
       fprintf(stderr, "rawgpu: compute fence %u timed out (fence reads %u, rptr %u, wptr %u)\n", seq, f,
               vi_mem_read32(q->v, &q->wb, VI_CQ_WB_RPTR), q->wptr);

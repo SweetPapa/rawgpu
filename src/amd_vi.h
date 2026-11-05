@@ -30,6 +30,10 @@ void vi_wsmc(vi_dev *v, uint32_t addr, uint32_t val);
 /* Poll until (reg & mask) == want. Returns 0, -ETIMEDOUT or the transport error. */
 int vi_wait(vi_dev *v, uint32_t idx, uint32_t mask, uint32_t want, unsigned timeout_us);
 void vi_udelay(unsigned us);
+/* Polling politely: spin for the first ~30 us of a wait, then sleep with a
+ * backoff up to 250 us between looks. Call with the time the wait began and a
+ * counter starting at 0. For waits on host memory, where a look is free. */
+void vi_poll_pause(double began, unsigned *round);
 /* amdgpu_device_program_register_sequence(): {reg, and_mask, or_mask} triples */
 void vi_program_sequence(vi_dev *v, const uint32_t *seq, size_t n);
 /* vi_srbm_select(): which ME/pipe/queue/VMID the banked registers address */

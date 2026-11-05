@@ -257,7 +257,8 @@ def main():
     ap.add_argument("--size", default="1280x720", help="render size, WxH")
     ap.add_argument("--window", default=None, help="window size if different (frames are scaled)")
     ap.add_argument("--seconds", type=float, default=0, help="quit after this long (per scene with --bench)")
-    ap.add_argument("--bench", action="store_true", help="run every scene, then print a summary")
+    ap.add_argument("--bench", action="store_true", help="run every scene (or --scenes) in turn, then print a summary")
+    ap.add_argument("--scenes", default=",".join(ORDER), help="for --bench: which scenes, in order")
     ap.add_argument("--headless", action="store_true", help="no window (SDL dummy driver)")
     ap.add_argument("--record", metavar="FILE.mp4", help="also write a video (60 fps of simulated time, via ffmpeg)")
     ap.add_argument("--shots", metavar="DIR", help="save a screenshot every --shot-every seconds")
@@ -303,7 +304,7 @@ def main():
     if args.shots:
         os.makedirs(args.shots, exist_ok=True)
 
-    queue = ORDER[ORDER.index(args.scene):] + ORDER[:ORDER.index(args.scene)] if args.bench else [args.scene]
+    queue = [s for s in args.scenes.split(",") if s in SCENES] if args.bench else [args.scene]
     results = []
     show_hud, running = True, True
     info, info_at = gpu.info, 0.0
@@ -311,10 +312,10 @@ def main():
         name = queue.pop(0)
         scene = get(name)
         gpu.finish()
-        t_sim, frames, start = 0.0, 0, time.time()
+        t_sim, frames, start, cpu0 = 0.0, 0, time.time(), time.process_time()
         fps, last, pending, k = 0.0, time.time(), None, 0
         temps, clocks, next_shot = [], [], args.shot_every
-        fixed = bool(args.record or args.bench)
+        fixed = bool(args.record)  # a video gets 60 fps of simulated time; a live run follows the clock
         while running:
             now = time.time()
             real_dt = now - last
@@ -387,13 +388,14 @@ def main():
         if frames:
             avg = frames / wall
             results.append((scene.name, frames, avg, scene.stats(avg), max(temps or [0]),
-                            (min(clocks or [0]), max(clocks or [0]))))
+                            (min(clocks or [0]), max(clocks or [0])), 100 * (time.process_time() - cpu0) / wall))
     if ffmpeg:
         ffmpeg.stdin.close()
         ffmpeg.wait()
         print("video:", args.record)
-    for name, frames, avg, st, tmax, (cmin, cmax) in results:
-        print(f"{name:<18} {frames:5d} frames  {avg:6.1f} fps  engine {cmin}-{cmax} MHz  max {tmax} C")
+    for name, frames, avg, st, tmax, (cmin, cmax), cpu in results:
+        print(f"{name:<18} {frames:5d} frames  {avg:6.1f} fps  engine {cmin}-{cmax} MHz  max {tmax} C  "
+              f"demo process {cpu:.0f}% of a Mac core")
         for s in st:
             print(f"{'':<18} {s}")
     pygame.quit()

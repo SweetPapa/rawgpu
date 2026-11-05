@@ -2,6 +2,31 @@
 
 Dated, factual notes from real hardware. Newest first.
 
+## 2026-11-04: host load of the demos, and fences in host memory
+
+A windowed stress suite: each scene for 60 s, then a 65536-star galaxy.
+- **The card:** 49.9 / 71.0 / 59.7 / 16.8 fps, with a peak of 76 C.
+  - In the 65K-star galaxy the engine fell to 1208-1373 MHz while doing its
+    most work of the run (144 G interactions/s, >= 2.9 TFLOPS).
+  - At 75 C that is likely the SMC's power limit, not heat.
+- **The Mac:** the demo took 42-64% of one core and about 175 MB, and the
+  TinyGPU server 42-62% of one core. The dext and WindowServer did not
+  change.
+- **Why:** the compute fence was in VRAM, so every look at it was a
+  register-sized BAR read, a socket round trip through the server, in a
+  tight loop.
+
+**Fix:**
+- The context's compute-queue writeback (read pointer and fences) now
+  lives in its GART-mapped control buffer. The CPU reads its own memory.
+- Waits on host writeback spin for 30 us, then sleep with a backoff to
+  250 us. The SDMA wait does the same.
+- Same windowed suite, 25 s per scene: the TinyGPU server went from about
+  50% to 2.0% of a core, and the demo to 36-48%, which is its own Python
+  and pygame drawing.
+- Frame rates are unchanged: 48.7 / 73.7 / 60.0 fps. Launch latency in
+  `compute-test` is still 96 us, and every suite passes.
+
 ## 2026-11-04: visual demos, and a launch-ordering bug they found
 
 `demos/rawgpu_demo.py` runs three scenes, rendered and simulated on the

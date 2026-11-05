@@ -339,10 +339,7 @@ int vi_cmd_didt(rg_dev *d, const rg_ident *id, int argc, char **argv) {
       uint32_t x = vi_rreg(&v, mmDIDT_IND_DATA);
       printf(" %s 0x%08x (%s)", blk[i].name, x, x & DIDT_SQ_CTRL0__DIDT_CTRL_EN_MASK ? "on" : "off");
     }
-    uint32_t fence = 0; /* amd_vi_ctx.c: compute writeback at VI_VRAM_FREE + 0x12000, fence at +16 */
-    vi_hdp_invalidate(&v);
-    d->ops->mmio_read(d, VI_VRAM_BAR, VI_VRAM_FREE + 0x12000 + 16, &fence, 4);
-    printf("\nGRBM_STATUS 0x%08x, host-API compute fence %u\n", vi_rreg(&v, mmGRBM_STATUS), fence);
+    printf("\nGRBM_STATUS 0x%08x\n", vi_rreg(&v, mmGRBM_STATUS)); /* the host API's fences are in its own memory now */
   }
   return v.err;
 }

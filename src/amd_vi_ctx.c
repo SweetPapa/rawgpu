@@ -9,7 +9,11 @@
 #define CTX_CQ_RING (VI_VRAM_FREE)              /* 64 KB compute ring */
 #define CTX_CQ_MQD  (CTX_CQ_RING + 0x10000)     /* 4 KB each: MQD, EOP, writeback */
 #define CTX_CQ_EOP  (CTX_CQ_MQD + 0x1000)
-#define CTX_CQ_WB   (CTX_CQ_EOP + 0x1000)
+/* The compute queue's writeback (read pointer, fences) lives in host memory,
+ * in the control buffer after the SDMA ring, its writeback and the VM fault
+ * page: the CPU checks a fence by reading its own memory, not by a register
+ * round trip through TinyGPU. */
+#define CTRL_CQ_WB  0x12000
 #define CTX_KARG    (CTX_CQ_RING + 0x20000)     /* kernarg ring: dispatch packet + kernargs per launch */
 #define CTX_KARG_SIZE ((33u << 20) - CTX_KARG)
 #define CTX_CODE    (33ull << 20)               /* code images: must stay CPU-writable, so inside the BAR */
@@ -55,7 +59,8 @@ int vi_ctx_open(vi_ctx *c, rg_dev *d, const rg_ident *id) {
 
   if ((r = vi_gfx_compute_init(v))) goto fail;
 #define VMEM(off) ((vi_mem){.bar = (off), .gpu = c->g.vram_start + (off)})
-  if ((r = vi_cq_start(&c->cq, v, VMEM(CTX_CQ_RING), 64u << 10, VMEM(CTX_CQ_WB), VMEM(CTX_CQ_MQD), VMEM(CTX_CQ_EOP)))) {
+  vi_mem cq_wb = {.cpu = (uint8_t *)c->ctrl.cpu + CTRL_CQ_WB, .gpu = c->ctrl_gpu + CTRL_CQ_WB};
+  if ((r = vi_cq_start(&c->cq, v, VMEM(CTX_CQ_RING), 64u << 10, cq_wb, VMEM(CTX_CQ_MQD), VMEM(CTX_CQ_EOP)))) {
     vi_cq_dump(&c->cq);
     goto fail;
   }

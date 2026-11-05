@@ -244,10 +244,12 @@ static uint32_t emit_fence(vi_sdma *s) {
 }
 
 int vi_sdma_wait(vi_sdma *s, uint32_t seq, unsigned timeout_ms) {
-  double end = vi_now() + timeout_ms / 1e3;
+  double began = vi_now(), end = began + timeout_ms / 1e3;
   uint32_t f;
+  unsigned round = 0;
   while ((int32_t)((f = vi_mem_read32(s->v, &s->wb, WB_FENCE)) - seq) < 0) {
     if (s->v->err) return s->v->err;
+    if (s->wb.cpu) vi_poll_pause(began, &round);
     if (vi_now() > end) {
       fprintf(stderr, "rawgpu: SDMA%d fence %u timed out (fence reads %u, rptr %u, wptr %u)\n", s->me, seq, f,
               vi_mem_read32(s->v, &s->wb, WB_RPTR) >> 2, s->wptr);

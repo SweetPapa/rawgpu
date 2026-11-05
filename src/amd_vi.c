@@ -63,6 +63,15 @@ void vi_udelay(unsigned us) {
   nanosleep(&ts, NULL);
 }
 
+void vi_poll_pause(double began, unsigned *round) {
+  if (vi_now() - began < 30e-6) return;
+  unsigned us = 20u << (*round < 4 ? *round : 4); /* 20, 40, 80, 160, 320 -> capped below */
+  if (us > 250) us = 250;
+  (*round)++;
+  struct timespec ts = {0, (long)us * 1000};
+  nanosleep(&ts, NULL);
+}
+
 /* Each read is a socket round trip (~10 us), so this polls about that often
  * without sleeping. */
 int vi_wait(vi_dev *v, uint32_t idx, uint32_t mask, uint32_t want, unsigned timeout_us) {
