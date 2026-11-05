@@ -96,3 +96,53 @@ separately, so the small kernels' shares include some launch overhead:
 The linear layers now run near this SGEMM's ceiling of 4.6-4.8 TFLOPS.
 Further gains would need a faster SGEMM, or fewer passes over memory for
 the row-wise steps, by fusing them into the products.
+
+## Indexing a code folder
+
+`index_code.py` embeds a folder of code (by default `~/code`) on the card
+and searches it. The rules it follows are in its docstring.
+
+```sh
+PY=local/eg2-venv/bin/python; IX=models/embeddinggemma2/index_code.py
+$PY $IX dry-run                      # files, chunks, tokens, time and size; what it skips and why
+caffeinate -i $PY $IX run            # resumable; a rerun embeds only what changed
+$PY $IX search "how do we post the card" -k 5 [--project rawgpu]
+```
+
+- **Read-only:** it only reads the folder, and writes to `~/rawgpu-index`
+  (`--out`), which must be outside it. It makes no network requests.
+- **Your code only:** clones, submodules, vendored folders and known
+  open-source projects are skipped, by their git remotes, package
+  manifests, names and folder names. Your accounts go in
+  `<out>/config.json` as `{"own_remotes": [regex, ...]}`. `dry-run` lists
+  every folder it treats as someone else's.
+- **Also skipped:** VCS folders, dependencies, build output, virtualenvs,
+  caches, binaries, minified files, lockfiles, generated files, files over
+  1 MB, `.env` files, keys, and any file whose text looks like it holds a
+  credential.
+- **Chunks:** 200-500 tokens, cut at blank lines, top-level definitions
+  and headings. A chunk overlaps the next one by up to 40 tokens only when
+  the cut falls inside a block.
+- **Storage:** one SQLite file holds each chunk's path, project, lines,
+  SHA-256, text and 768-float vector. `search` builds a memory-mapped copy
+  of the vectors next to it on first use.
+- **Resuming:** work is committed every 1024 chunks. Unchanged files
+  (same size and mtime) are not reread, and a chunk whose hash is already
+  indexed reuses its vector.
+- **Self-checks:** every 10 minutes it embeds a fixed text and compares it
+  with the CPU reference's vector. It stops on a mismatch, a GPU error, a
+  non-finite vector, or 85 C. It logs throughput, clocks, temperature, fan,
+  and host against GPU time to `<out>/logs/`.
+
+The full run on 2026-11-05:
+
+| | |
+|---|---|
+| indexed | 48,706 files in 308 projects, 435,243 chunks, 163M tokens |
+| time | 4.59 h, 26.0 chunks/s, 9.7k tokens/s |
+| host share | 4% (file reading, chunking, tokenizing, embedding lookup); GPU 96% |
+| size | 2.00 GB SQLite, plus a 1.34 GB search cache |
+| card | engine 997-1543 MHz, memory 400-2000 MHz, 49-75 C, fan up to 57% |
+| canary | 28 checks, all cosine 1.0000001, max difference 1.7e-7 |
+| errors | none |
+| search | about 1 s per run of queries, including loading the model |

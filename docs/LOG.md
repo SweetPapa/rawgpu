@@ -2,6 +2,49 @@
 
 Dated, factual notes from real hardware. Newest first.
 
+## 2026-11-05: `rawgpu eject`, the fan readout, and ~/code indexed on the card
+
+**`rawgpu eject`** makes unplugging the enclosure safe.
+- **Waiting:** while another program holds the card, it waits, checking
+  every 5 seconds. It finds the server by its arguments and counts its
+  connected sockets (`proc_pidinfo`), because it must not connect. TinyGPU
+  takes one client, a second connection waits in the backlog, and further
+  ones are refused.
+- **Never abandon a request:** an earlier version sent a probe, timed out
+  and closed. The server later answered the closed socket and died of
+  SIGPIPE. Attaching now sets `SO_NOSIGPIPE` and waits for the reply.
+- **Closing:** it waits for GUI_ACTIVE to clear, retires the compute queue,
+  halts both SDMA engines, closes the card, stops the server (SIGTERM, then
+  SIGKILL after 5 s) and removes its socket.
+- **Tested:** on an idle card (the next command starts a new server, and
+  the card stays posted with DPM on); with a program holding the card (it
+  waited 15 s, then finished); and against the indexing run below with
+  `--timeout 20` (it gave up with "NOT safe to unplug", and the run went
+  on undisturbed). Not tested against a program killed mid-launch.
+
+**Fan:** `rawgpu_info.fan_percent` is the SMC's PWM duty
+(CG_THERMAL_STATUS.FDO_PWM_DUTY over CG_FDO_CTRL1.FMAX_DUTY100), -1 before
+`dpm-enable`. `bench.py` now logs the memory clock and the fan too.
+
+**Indexing `~/code`** with `models/embeddinggemma2/index_code.py`:
+- **Other people's code:** the first dry run came to 548M tokens and about
+  15 hours. Two ESP-IDF copies were 46% of it. Skipping clones, vendored
+  folders and known open-source projects cut it to 161M tokens. It found 58
+  such folders, among them llama.cpp, whisper.cpp, LVGL, OpenSSL, Espressif
+  components and rawgpu's own `upstream/` Linux headers. Before that,
+  Linux's headers outranked rawgpu's code in searches.
+- **The full run:** 4.59 hours for 429,940 chunks, at 26.0 chunks/s and
+  9.7k tokens/s. 48,706 files, 2.00 GB. No errors.
+- **Canary:** all 28 checks matched the CPU reference to cosine 1.0000001.
+- **Card:** 49-75 C, fan up to 57%.
+- **Memory clock:** samples read 400, 1000 or 2000 MHz. The SMC's memory
+  DPM switches levels, and throughput stayed flat through all of them.
+- **Host time** was 4%, against a 10% threshold for rewriting the host
+  side in Rust. The host side is file reading, chunking, tokenizing and
+  the embedding lookup. The split needed care: a launch blocks when the
+  command ring is full, so the first measurement counted GPU time as host
+  time and showed 86%.
+
 ## 2026-11-05: EmbeddingGemma 2 1.56x faster: padded rows, windowed attention, 8K inputs
 
 A per-kernel profile of a 2048-token batch showed most of the products far
