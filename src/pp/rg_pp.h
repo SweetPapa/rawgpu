@@ -17,6 +17,17 @@
 enum { RG_PP_IND_PCIE = 0, RG_PP_IND_SMC = 1, RG_PP_IND_UVD_CTX = 2, RG_PP_IND_DIDT = 3, RG_PP_IND_GC_CAC = 4,
        RG_PP_IND_SE_CAC = 5, RG_PP_IND_AUDIO = 6 };
 
+/* An engine image as amdgpu_ucode_init_bo() leaves it: in VRAM, with the
+ * header fields amdgpu_cgs_get_firmware_info() reports. */
+enum { RG_PP_UC_SDMA0, RG_PP_UC_SDMA1, RG_PP_UC_CE, RG_PP_UC_PFP, RG_PP_UC_ME, RG_PP_UC_MEC, RG_PP_UC_RLC, RG_PP_UC_COUNT };
+typedef struct {
+  uint64_t mc;               /* MC address of the image; the MEC jump table follows at mc + ALIGN(ucode bytes, 4 KB) */
+  uint32_t ucode_bytes;      /* common header ucode_size_bytes */
+  uint32_t ucode_version, feature_version;
+  uint32_t jt_offset, jt_size; /* gfx_firmware_header_v1_0, dwords (MEC) */
+  const void *image;
+} rg_pp_ucode;
+
 typedef struct {
   void *ctx;
   uint32_t (*rreg)(void *ctx, uint32_t idx); /* dword index, as amdgpu's RREG32 */
@@ -25,6 +36,17 @@ typedef struct {
   void (*wind)(void *ctx, int space, uint32_t addr, uint32_t v);
   void (*delay_us)(void *ctx, unsigned long us); /* drains queued register writes first */
   int (*err)(void *ctx);                       /* sticky transport error, 0 if none */
+  /* VRAM write by MC address, then an HDP flush (memcpy_toio() into an SMU buffer) */
+  int (*vram_write)(void *ctx, uint64_t mc, const void *src, size_t len);
+  /* amdgpu_ucode_init_bo(): put the engine images in VRAM and describe them */
+  int (*ucode_init_bo)(void *ctx, rg_pp_ucode out[RG_PP_UC_COUNT]);
+  /* gfx_v8_0_set_safe_mode() / unset_safe_mode(): the RLC holds GFX clocks
+   * and power on while powerplay programs GFX registers (DIDT, CAC) */
+  void (*rlc_safe_mode)(void *ctx, bool enter);
+  bool no_didt;                  /* leave the SQ/DB/TD/TCP di/dt limiters off (rawgpu option) */
+  /* the SMC firmware, for smu7_upload_smu_firmware_image() */
+  const void *smc_image;
+  uint32_t smc_bytes, smc_start_addr;
 
   void *atom_context;            /* struct atom_context * (rg_atom_context()) */
   const uint8_t *bios;
@@ -48,6 +70,12 @@ typedef struct rg_pp rg_pp;
 /* amd_powerplay_create() + hwmgr_early_init() + hwmgr_sw_init(). Touches no hardware. */
 int rg_pp_open(rg_pp **out, const rg_pp_host *h);
 void rg_pp_close(rg_pp *p);
+
+/* polaris10_start_smu(), as amdgpu runs it from pp_dpm_load_fw(): start the
+ * SMC firmware in protected mode, stage AVFS (polaris10_avfs_event_mgr()), and
+ * have the SMU load the engine microcode (smu7_request_smu_load_fw()). For a
+ * card whose SMC is still on its boot ROM. */
+int rg_pp_start_smu(rg_pp *p);
 
 /* The first half of hwmgr_hw_init(): parse the PowerPlay table and run
  * smu7_hwmgr_backend_init(), which resolves EVV voltages through VBIOS

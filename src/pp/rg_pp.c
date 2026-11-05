@@ -23,8 +23,14 @@ struct rg_cgs {
   struct rg_pp *p;
 };
 
+struct rg_bo { void *shadow; size_t size; uint64_t mc; };
+
 struct rg_pp {
   rg_pp_host h;
+  struct rg_bo bo[4];          /* amdgpu_bo_create_kernel() buffers: CPU shadows of VRAM */
+  rg_pp_ucode uc[RG_PP_UC_COUNT];
+  bool uc_ready;
+  bool in_safe_mode;
   struct amdgpu_device adev;
   struct pci_dev pdev;
   struct device dev;
@@ -102,11 +108,46 @@ static void cgs_wind(struct cgs_device *d, enum cgs_ind_reg space, unsigned inde
   struct rg_pp *p = cgs_pp(d);
   p->h.wind(p->h.ctx, (int)space, index, v);
 }
-/* Only the SMU-load path asks for firmware (smu7_request_smu_load_fw()), and
- * rawgpu loads the SMC and the engine images itself (`rawgpu smc-load`). */
+/* amdgpu_cgs_get_firmware_info(): the SMC image for the upload, and for the
+ * engines, where amdgpu_ucode_init_bo() put each image and what it says. */
 static int cgs_fw_info(struct cgs_device *d, enum cgs_ucode_id type, struct cgs_firmware_info *info) {
-  rg_pp_log("error", "cgs_get_firmware_info(%d): firmware loading belongs to `rawgpu smc-load`\n", (int)type);
-  return -EINVAL;
+  struct rg_pp *p = cgs_pp(d);
+  if (type == CGS_UCODE_ID_SMU || type == CGS_UCODE_ID_SMU_SK) {
+    if (!p->h.smc_image) return -EINVAL;
+    info->version = (uint16_t)p->h.smc_version; /* adev->pm.fw_version, truncated as cgs does */
+    info->image_size = p->h.smc_bytes;
+    info->ucode_start_address = p->h.smc_start_addr;
+    info->kptr = (void *)p->h.smc_image;
+    info->is_kicker = p->h.is_kicker;
+    return 0;
+  }
+  int i; /* fw_type_convert(): both MEC jump tables come from MEC1 on VI */
+  switch (type) {
+  case CGS_UCODE_ID_SDMA0: i = RG_PP_UC_SDMA0; break;
+  case CGS_UCODE_ID_SDMA1: i = RG_PP_UC_SDMA1; break;
+  case CGS_UCODE_ID_CP_CE: i = RG_PP_UC_CE; break;
+  case CGS_UCODE_ID_CP_PFP: i = RG_PP_UC_PFP; break;
+  case CGS_UCODE_ID_CP_ME: i = RG_PP_UC_ME; break;
+  case CGS_UCODE_ID_CP_MEC: case CGS_UCODE_ID_CP_MEC_JT1: case CGS_UCODE_ID_CP_MEC_JT2: i = RG_PP_UC_MEC; break;
+  case CGS_UCODE_ID_RLC_G: i = RG_PP_UC_RLC; break;
+  default: return -EINVAL;
+  }
+  if (!p->uc_ready) return -EINVAL;
+  const rg_pp_ucode *u = &p->uc[i];
+  uint64_t gpu_addr = u->mc;
+  uint32_t data_size = u->ucode_bytes;
+  if (type == CGS_UCODE_ID_CP_MEC_JT1 || type == CGS_UCODE_ID_CP_MEC_JT2) {
+    gpu_addr += ALIGN((uint64_t)u->ucode_bytes, PAGE_SIZE);
+    data_size = u->jt_size << 2;
+  }
+  info->kptr = (void *)u->image;
+  info->image_size = data_size;
+  info->mc_addr = gpu_addr;
+  info->version = (uint16_t)u->ucode_version;
+  if (type == CGS_UCODE_ID_CP_MEC) info->image_size = u->jt_offset << 2;
+  info->fw_version = (uint16_t)u->ucode_version; /* amdgpu_get_firmware_version() */
+  info->feature_version = (uint16_t)u->feature_version;
+  return 0;
 }
 static const struct cgs_ops rg_cgs_ops = {
   .read_register = cgs_rreg,
@@ -134,6 +175,8 @@ int amdgpu_bo_create_kernel(struct amdgpu_device *adev, unsigned long size, int 
   }
   void *shadow = calloc(1, size);
   if (!shadow) return -ENOMEM;
+  for (size_t i = 0; i < ARRAY_SIZE(p->bo); i++)
+    if (!p->bo[i].shadow) { p->bo[i] = (struct rg_bo){shadow, size, mc}; break; }
   *bo_ptr = (struct amdgpu_bo *)shadow;
   if (gpu_addr) *gpu_addr = mc;
   if (cpu_addr) *cpu_addr = shadow;
@@ -141,9 +184,28 @@ int amdgpu_bo_create_kernel(struct amdgpu_device *adev, unsigned long size, int 
 }
 
 void amdgpu_bo_free_kernel(struct amdgpu_bo **bo, u64 *gpu_addr, void **cpu_addr) {
+  if (bo && *bo && g_pp)
+    for (size_t i = 0; i < ARRAY_SIZE(g_pp->bo); i++)
+      if (g_pp->bo[i].shadow == (void *)*bo) g_pp->bo[i] = (struct rg_bo){0};
   if (bo && *bo) { free(*bo); *bo = NULL; }
   if (gpu_addr) *gpu_addr = 0;
   if (cpu_addr) *cpu_addr = NULL;
+}
+
+/* The TOC reaches the SMU through this (smu7_request_smu_load_fw()): a write
+ * into an SMU buffer's shadow goes on to VRAM at the same offset. */
+void rg_pp_memcpy_toio(void *dst, const void *src, size_t n) {
+  memcpy(dst, src, n);
+  if (!g_pp) return;
+  for (size_t i = 0; i < ARRAY_SIZE(g_pp->bo); i++) {
+    struct rg_bo *b = &g_pp->bo[i];
+    uint8_t *s = b->shadow, *d = dst;
+    if (s && d >= s && d + n <= s + b->size) {
+      if (g_pp->h.vram_write(g_pp->h.ctx, b->mc + (uint64_t)(d - s), src, n))
+        rg_pp_log("error", "VRAM write for an SMU buffer failed\n");
+      return;
+    }
+  }
 }
 
 /* No interrupts reach rawgpu (TinyGPU has no MSI path): thermal and CTF IRQ
@@ -152,10 +214,21 @@ int amdgpu_irq_add_id(struct amdgpu_device *adev, unsigned client_id, unsigned s
   return 0;
 }
 
-/* amdgpu_gfx_rlc_enter_safe_mode() does nothing unless GFX clock gating is on
- * (adev->cg_flags), and rawgpu never enables it. */
-void amdgpu_gfx_rlc_enter_safe_mode(struct amdgpu_device *adev, int xcc_id) {}
-void amdgpu_gfx_rlc_exit_safe_mode(struct amdgpu_device *adev, int xcc_id) {}
+/* amdgpu_gfx_rlc_enter_safe_mode(): on Polaris 10 amdgpu's cg_flags include
+ * GFX CGCG/MGCG (vi_common_early_init()), so it always takes the RLC into safe
+ * mode here, and so does rawgpu. The host checks that the RLC is running. */
+void amdgpu_gfx_rlc_enter_safe_mode(struct amdgpu_device *adev, int xcc_id) {
+  struct rg_pp *p = adev->rg;
+  if (p->in_safe_mode || !p->h.rlc_safe_mode) return;
+  p->h.rlc_safe_mode(p->h.ctx, true);
+  p->in_safe_mode = true;
+}
+void amdgpu_gfx_rlc_exit_safe_mode(struct amdgpu_device *adev, int xcc_id) {
+  struct rg_pp *p = adev->rg;
+  if (!p->in_safe_mode) return;
+  p->h.rlc_safe_mode(p->h.ctx, false);
+  p->in_safe_mode = false;
+}
 
 /* UVD/VCE gating: rawgpu brings up neither block. */
 int amdgpu_device_ip_set_powergating_state(void *dev, enum amd_ip_block_type t, enum amd_powergating_state s) {
@@ -168,8 +241,11 @@ struct amdgpu_ip_block *amdgpu_device_ip_get_ip_block(struct amdgpu_device *adev
   return NULL;
 }
 int amdgpu_ucode_init_bo(struct amdgpu_device *adev) {
-  rg_pp_log("error", "amdgpu_ucode_init_bo(): firmware loading belongs to `rawgpu smc-load`\n");
-  return -EINVAL;
+  struct rg_pp *p = adev->rg;
+  int r = p->h.ucode_init_bo ? p->h.ucode_init_bo(p->h.ctx, p->uc) : -EINVAL;
+  p->uc_ready = r == 0;
+  if (r) rg_pp_log("error", "placing the engine microcode failed (%d)\n", r);
+  return r;
 }
 /* No ACPI on a Mac: the PCIe performance request (ATCS) is not available. */
 int amdgpu_acpi_pcie_performance_request(struct amdgpu_device *adev, u8 perf_req, bool advertise) { return -EINVAL; }
@@ -229,11 +305,17 @@ int rg_pp_open(rg_pp **out, const rg_pp_host *h) {
   p->hwmgr = hwmgr;
 
   int r = hwmgr_early_init(hwmgr); /* pp_early_init() */
+  if (!r && h->no_didt) { /* polaris_set_asic_special_caps() turned these on */
+    phm_cap_unset(hwmgr->platform_descriptor.platformCaps, PHM_PlatformCaps_SQRamping);
+    phm_cap_unset(hwmgr->platform_descriptor.platformCaps, PHM_PlatformCaps_DBRamping);
+    phm_cap_unset(hwmgr->platform_descriptor.platformCaps, PHM_PlatformCaps_TDRamping);
+    phm_cap_unset(hwmgr->platform_descriptor.platformCaps, PHM_PlatformCaps_TCPRamping);
+  }
   if (!r) r = hwmgr_sw_init(hwmgr);  /* pp_sw_init(): polaris10_smu_init() */
   /* What smu7_upload_smu_firmware_image() records while it uploads the SMC
    * firmware; `rawgpu smc-load` did the upload. */
   hwmgr->is_kicker = h->is_kicker;
-  hwmgr->smu_version = h->smc_version;
+  hwmgr->smu_version = (uint16_t)h->smc_version; /* cgs_firmware_info.version is 16 bits */
   if (r) { rg_pp_log("error", "powerplay init failed (%d)\n", r); rg_pp_close(p); return r; }
   *out = p;
   return 0;
@@ -252,6 +334,13 @@ void rg_pp_close(rg_pp *p) {
   }
   if (g_pp == p) g_pp = NULL;
   free(p);
+}
+
+int rg_pp_start_smu(rg_pp *p) {
+  struct pp_hwmgr *hwmgr = p->hwmgr;
+  int r = hwmgr->smumgr_funcs->start_smu(hwmgr); /* pp_dpm_load_fw() */
+  if (r) rg_pp_log("error", "polaris10_start_smu failed (%d)\n", r);
+  return r ? r : p->h.err(p->h.ctx);
 }
 
 int rg_pp_read_tables(rg_pp *p) {

@@ -301,7 +301,7 @@ static int cmd_post(rg_dev *d, const rg_ident *id, int argc, char **argv) {
 
   posted = vi_posted(&v, &memsize);
   printf("posted:            %s (CONFIG_MEMSIZE = %u MB)\n", posted ? "yes" : "NO", memsize);
-  if (posted) vi_report_mc(&v);
+  if (posted) { vi_report_mc(&v); vi_state_clear(&v); }
   else r = v.err ? v.err : -EIO;
 out:
   rg_atom_close(a);
@@ -518,6 +518,7 @@ static int cmd_mc_load(rg_dev *d, const rg_ident *id, int argc, char **argv) {
   double train = 0;
   r = vi_mc_load_ucode(&v, &fw, &train);
   uint32_t after = vi_mc_ucode_version(&v);
+  vi_state_clear(&v); /* retraining leaves VRAM undefined */
   printf("MC firmware:  %s.bin v0x%08x, %u dwords + %u IO registers; version register 0x%08x -> 0x%08x; "
          "training %s after %.1f ms (MC_SEQ_MISC0 0x%08x)\n", fw.name, fw.ucode_version, fw.ucode_dw,
          amd_fw_hdr32(&fw, 32) / 8, before, after, r ? "NOT done" : "done", train * 1e3, vi_rreg(&v, mmMC_SEQ_MISC0));
@@ -531,6 +532,9 @@ int vi_cmd_compute_test(rg_dev *d, const rg_ident *id, int argc, char **argv); /
 int vi_cmd_bench_compute(rg_dev *d, const rg_ident *id, int argc, char **argv); /* amd_vi_bench.c */
 int vi_cmd_dpm_info(rg_dev *d, const rg_ident *id, int argc, char **argv);      /* amd_vi_dpm.c */
 int vi_cmd_dpm_enable(rg_dev *d, const rg_ident *id, int argc, char **argv);    /* amd_vi_dpm.c */
+int vi_cmd_didt(rg_dev *d, const rg_ident *id, int argc, char **argv);          /* amd_vi_dpm.c */
+int vi_cmd_waves(rg_dev *d, const rg_ident *id, int argc, char **argv);         /* amd_vi_gfx.c */
+int vi_cmd_gfx_reset(rg_dev *d, const rg_ident *id, int argc, char **argv);     /* amd_vi_gfx.c */
 
 static const rg_cmd vi_cmds[] = {
   {"status", "", "engine, VM and SMC state (read-only)", cmd_status},
@@ -551,9 +555,13 @@ static const rg_cmd vi_cmds[] = {
    vi_cmd_compute_test},
   {"dpm-info", "[-v]", "PowerPlay table and EVV voltages, parsed by amdgpu's powerplay code (no clock or SMC writes)",
    vi_cmd_dpm_info},
-  {"dpm-enable", "[--no-mclk] [--no-deep-sleep] [--no-ulv] [--level auto|low|high] [-v] [--trace FILE]",
+  {"dpm-enable", "[--no-didt] [--no-mclk] [--no-deep-sleep] [--no-ulv] [--level auto|low|high] [-v] [--trace FILE]",
    "WRITES: amdgpu's power management: DPM tables into the SMC, clock/voltage DPM, fan and power limits on",
    vi_cmd_dpm_enable},
+  {"waves", "", "every live shader wave: PC, status, current instruction (writes only the SQ/GRBM index registers)",
+   vi_cmd_waves},
+  {"gfx-reset", "", "WRITES: amdgpu's GFX soft reset (gfx_v8_0_soft_reset()) to clear a hung compute queue", vi_cmd_gfx_reset},
+  {"didt", "[off]", "di/dt limiter state, GRBM busy and the compute fence; off WRITES DIDT_CTRL_EN = 0", vi_cmd_didt},
   {"bench-compute", "[--sgemm N] [--kernels DIR]",
    "WRITES: host API end to end: copy bandwidth, FP32 FMA rate, LDS-tiled SGEMM, each checked on the CPU",
    vi_cmd_bench_compute},

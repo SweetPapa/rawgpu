@@ -70,6 +70,7 @@
 #define DEQUEUE_DRAIN_PIPE 1 /* enum hqd_dequeue_request_type */
 #define SHARED_APERTURE_BASES 0x2000 /* gmc_v8: shared_aperture_start (0x2000000000000000) >> 48 */
 #define POLARIS10_SE 4               /* shader engines; 1 SH each (VBIOS gfx_info) */
+#define POLARIS10_CU_PER_SH 9        /* max_cu_per_sh (VBIOS gfx_info): 36 CUs over 4 SEs */
 #define VI_DOORBELL_BAR 2
 
 /* struct vi_mqd from cp_mqd_base_addr_lo mirrors the HQD registers from mmCP_MQD_BASE_ADDR */
@@ -198,7 +199,6 @@ static void cp_doorbells_and_mec(vi_dev *v) {
 }
 
 /* gfx_v8_0_get_cu_active_bitmap(), summed over the shader engines */
-#define POLARIS10_CU_PER_SH 9 /* max_cu_per_sh (VBIOS gfx_info): 36 CUs over 4 SEs */
 int vi_gfx_cu_count(vi_dev *v) {
   int n = 0;
   for (uint32_t se = 0; se < POLARIS10_SE; se++) {
@@ -210,13 +210,63 @@ int vi_gfx_cu_count(vi_dev *v) {
   return v->err ? v->err : n;
 }
 
+/* gfx_v8_0_set_safe_mode() / gfx_v8_0_unset_safe_mode() */
+void vi_rlc_safe_mode(vi_dev *v, bool enter) {
+  if (!REG_GET_FIELD(vi_rreg(v, mmRLC_CNTL), RLC_CNTL, RLC_ENABLE_F32)) return; /* gfx_v8_0_is_rlc_enabled() */
+  uint32_t data = vi_rreg(v, mmRLC_CNTL);
+  data |= RLC_SAFE_MODE__CMD_MASK;
+  data &= ~RLC_SAFE_MODE__MESSAGE_MASK;
+  if (enter) data |= 1u << RLC_SAFE_MODE__MESSAGE__SHIFT;
+  vi_wreg(v, mmRLC_SAFE_MODE, data);
+  if (enter) {
+    uint32_t want = RLC_GPM_STAT__GFX_CLOCK_STATUS_MASK | RLC_GPM_STAT__GFX_POWER_STATUS_MASK;
+    if (vi_wait(v, mmRLC_GPM_STAT, want, want, 1000000) == -ETIMEDOUT)
+      fprintf(stderr, "rawgpu: warning: RLC safe mode: GFX clock/power status not reported on\n");
+  }
+  if (vi_wait(v, mmRLC_SAFE_MODE, RLC_SAFE_MODE__CMD_MASK, 0, 1000000) == -ETIMEDOUT)
+    fprintf(stderr, "rawgpu: warning: RLC did not acknowledge safe mode %s\n", enter ? "entry" : "exit");
+}
+
+/* The per-power-cycle state page in VRAM (inside BAR0). A 64-bit magic marks it valid. */
+#define STATE_MAGIC 0x7261776770753031ull /* "rawgpu01" */
+#define STATE_GFX_UP 1u
+typedef struct { uint64_t magic; uint32_t flags, pad; } vi_state;
+
+static uint32_t state_flags(vi_dev *v) {
+  vi_state s = {0};
+  vi_hdp_invalidate(v);
+  if (!v->err) v->err = v->d->ops->mmio_read(v->d, VI_VRAM_BAR, VI_VRAM_STATE, &s, sizeof s);
+  return s.magic == STATE_MAGIC ? s.flags : 0;
+}
+
+static void state_set(vi_dev *v, uint32_t flags) {
+  vi_state s = {STATE_MAGIC, flags, 0};
+  vi_vram_write(v, VI_VRAM_STATE, &s, sizeof s);
+  vi_hdp_flush(v);
+}
+
+void vi_state_clear(vi_dev *v) {
+  static const vi_state zero;
+  vi_vram_write(v, VI_VRAM_STATE, &zero, sizeof zero);
+  vi_hdp_flush(v);
+}
+
+/* gfx_v8_0_hw_init() runs once per power cycle in amdgpu: golden registers,
+ * constants, RLC resume (which soft-resets the RLC) and CP resume. Later
+ * rawgpu processes find the state page marked and only re-check the doorbells
+ * and the MEC, so the RLC is not reset again while power management runs. */
 int vi_gfx_compute_init(vi_dev *v) {
+  if (state_flags(v) & STATE_GFX_UP) {
+    cp_doorbells_and_mec(v);
+    return v->err;
+  }
   golden_registers(v);
   constants(v);
   int r = rlc_resume(v);
   if (r) return r;
   gui_idle_interrupt_off(v); /* gfx_v8_0_cp_resume() */
   cp_doorbells_and_mec(v);
+  if (!v->err) state_set(v, STATE_GFX_UP);
   return v->err;
 }
 
@@ -579,6 +629,113 @@ void vi_cq_dump(vi_cq *q) {
   if (!v->err) v->err = e;
 }
 
+/* ---- rawgpu gfx-reset ---- */
+
+/* gfx_v8_0_deactivate_hqd(); the queue must be selected */
+static int deactivate_hqd(vi_dev *v, uint32_t req) {
+  int r = 0;
+  if (vi_rreg(v, mmCP_HQD_ACTIVE) & CP_HQD_ACTIVE__ACTIVE_MASK) {
+    vi_wreg(v, mmCP_HQD_DEQUEUE_REQUEST,
+            REG_SET_FIELD(vi_rreg(v, mmCP_HQD_DEQUEUE_REQUEST), CP_HQD_DEQUEUE_REQUEST, DEQUEUE_REQ, req));
+    r = vi_wait(v, mmCP_HQD_ACTIVE, CP_HQD_ACTIVE__ACTIVE_MASK, 0, 1000000);
+  }
+  vi_wreg(v, mmCP_HQD_DEQUEUE_REQUEST, 0);
+  vi_wreg(v, mmCP_HQD_PQ_RPTR, 0);
+  vi_wreg(v, mmCP_HQD_PQ_WPTR, 0);
+  return r;
+}
+
+/* `rawgpu gfx-reset`: gfx_v8_0_soft_reset() for the one queue rawgpu uses.
+ * Reset the HQD's waves (dequeue type 2), halt the MEC and RLC (the parts of
+ * gfx_v8_0_hw_fini() that apply), stall and clear GFX's memory requests in
+ * GMCON, pulse the GRBM and SRBM resets, unstall. The next compute command
+ * brings the RLC and MEC back (vi_gfx_compute_init()). */
+int vi_cmd_gfx_reset(rg_dev *d, const rg_ident *id, int argc, char **argv) {
+  vi_dev v;
+  int r = vi_open(&v, d);
+  if (r) return r;
+  printf("before: GRBM_STATUS 0x%08x, SRBM_STATUS 0x%08x\n", vi_rreg(&v, mmGRBM_STATUS), vi_rreg(&v, mmSRBM_STATUS));
+  vi_srbm_select(&v, 1, 0, 0, 0);
+  int dq = deactivate_hqd(&v, 2); /* RESET_WAVES */
+  vi_srbm_select(&v, 0, 0, 0, 0);
+  vi_udelay(50);
+  printf("HQD deactivate: %s\n", dq ? "timed out (resetting anyway)" : "done");
+  vi_wreg(&v, mmCP_MEC_CNTL, CP_MEC_CNTL__MEC_ME1_HALT_MASK | CP_MEC_CNTL__MEC_ME2_HALT_MASK);
+  vi_wreg(&v, mmRLC_CNTL, REG_SET_FIELD(vi_rreg(&v, mmRLC_CNTL), RLC_CNTL, RLC_ENABLE_F32, 0));
+  vi_udelay(50);
+
+  uint32_t grbm = GRBM_SOFT_RESET__SOFT_RESET_RLC_MASK | GRBM_SOFT_RESET__SOFT_RESET_GFX_MASK |
+                  GRBM_SOFT_RESET__SOFT_RESET_CP_MASK | GRBM_SOFT_RESET__SOFT_RESET_CPF_MASK |
+                  GRBM_SOFT_RESET__SOFT_RESET_CPC_MASK | GRBM_SOFT_RESET__SOFT_RESET_CPG_MASK;
+  uint32_t srbm = SRBM_SOFT_RESET__SOFT_RESET_GRBM_MASK | SRBM_SOFT_RESET__SOFT_RESET_SEM_MASK;
+  uint32_t t = vi_rreg(&v, mmGMCON_DEBUG);
+  vi_wreg(&v, mmGMCON_DEBUG, t | GMCON_DEBUG__GFX_STALL_MASK | GMCON_DEBUG__GFX_CLEAR_MASK);
+  vi_udelay(100);
+  t = vi_rreg(&v, mmGRBM_SOFT_RESET) | grbm;
+  vi_wreg(&v, mmGRBM_SOFT_RESET, t);
+  vi_rreg(&v, mmGRBM_SOFT_RESET);
+  vi_udelay(100);
+  vi_wreg(&v, mmGRBM_SOFT_RESET, t & ~grbm);
+  vi_rreg(&v, mmGRBM_SOFT_RESET);
+  vi_udelay(100);
+  t = vi_rreg(&v, mmSRBM_SOFT_RESET) | srbm;
+  vi_wreg(&v, mmSRBM_SOFT_RESET, t);
+  vi_rreg(&v, mmSRBM_SOFT_RESET);
+  vi_udelay(100);
+  vi_wreg(&v, mmSRBM_SOFT_RESET, t & ~srbm);
+  vi_rreg(&v, mmSRBM_SOFT_RESET);
+  vi_udelay(100);
+  t = vi_rreg(&v, mmGMCON_DEBUG);
+  vi_wreg(&v, mmGMCON_DEBUG, t & ~(GMCON_DEBUG__GFX_STALL_MASK | GMCON_DEBUG__GFX_CLEAR_MASK));
+  vi_udelay(100);
+  vi_state_clear(&v); /* the next compute command brings GFX up again */
+  printf("after:  GRBM_STATUS 0x%08x, SRBM_STATUS 0x%08x\n", vi_rreg(&v, mmGRBM_STATUS), vi_rreg(&v, mmSRBM_STATUS));
+  rg_pci_err e;
+  if (!rg_pci_errors(d, &e)) rg_pci_print_errors(&e);
+  return v.err;
+}
+
+/* ---- rawgpu waves ---- */
+
+/* gfx_v8_0.c wave_read_ind(): the SQ's per-wave registers through its index window */
+static uint32_t wave_read_ind(vi_dev *v, uint32_t simd, uint32_t wave, uint32_t address) {
+  vi_wreg(v, mmSQ_IND_INDEX, (wave << SQ_IND_INDEX__WAVE_ID__SHIFT) | (simd << SQ_IND_INDEX__SIMD_ID__SHIFT) |
+                                 (address << SQ_IND_INDEX__INDEX__SHIFT) | SQ_IND_INDEX__FORCE_READ_MASK);
+  return vi_rreg(v, mmSQ_IND_DATA);
+}
+
+/* `rawgpu waves`: every live wave, as amdgpu's debugfs wave reader walks them
+ * (select SE/SH/CU with GRBM_GFX_INDEX, then SIMD and wave through SQ_IND_INDEX). */
+int vi_cmd_waves(rg_dev *d, const rg_ident *id, int argc, char **argv) {
+  vi_dev v;
+  int r = vi_open(&v, d);
+  if (r) return r;
+  int n = 0;
+  for (uint32_t se = 0; se < POLARIS10_SE; se++)
+    for (uint32_t cu = 0; cu < POLARIS10_CU_PER_SH; cu++) {
+      uint32_t x = REG_SET_FIELD(0, GRBM_GFX_INDEX, INSTANCE_INDEX, cu); /* gfx_v8_0_select_se_sh(se, 0, cu) */
+      x = REG_SET_FIELD(x, GRBM_GFX_INDEX, SE_INDEX, se);
+      x = REG_SET_FIELD(x, GRBM_GFX_INDEX, SH_INDEX, 0);
+      vi_wreg(&v, mmGRBM_GFX_INDEX, x);
+      for (uint32_t simd = 0; simd < 4; simd++)
+        for (uint32_t w = 0; w < 10; w++) {
+          uint32_t st = wave_read_ind(&v, simd, w, ixSQ_WAVE_STATUS);
+          if (!(st & SQ_WAVE_STATUS__VALID_MASK)) continue;
+          uint64_t pc = wave_read_ind(&v, simd, w, ixSQ_WAVE_PC_LO) |
+                        (uint64_t)wave_read_ind(&v, simd, w, ixSQ_WAVE_PC_HI) << 32;
+          printf("SE%u CU%u SIMD%u wave %u: PC 0x%010llx STATUS 0x%08x%s%s%s IB_STS 0x%08x TRAPSTS 0x%08x INST 0x%08x\n", se, cu,
+                 simd, w, (unsigned long long)pc, st, st & SQ_WAVE_STATUS__HALT_MASK ? " HALT" : "",
+                 st & SQ_WAVE_STATUS__TRAP_MASK ? " TRAP" : "", st & SQ_WAVE_STATUS__IN_BARRIER_MASK ? " BARRIER" : "",
+                 wave_read_ind(&v, simd, w, ixSQ_WAVE_IB_STS), wave_read_ind(&v, simd, w, ixSQ_WAVE_TRAPSTS),
+                 wave_read_ind(&v, simd, w, ixSQ_WAVE_INST_DW0));
+          n++;
+        }
+    }
+  select_se_sh(&v, ~0u, ~0u);
+  printf("%d live wave%s; GRBM_STATUS 0x%08x\n", n, n == 1 ? "" : "s", vi_rreg(&v, mmGRBM_STATUS));
+  return v.err;
+}
+
 /* ---- rawgpu compute-test ---- */
 
 #define PHASE(fmt, ...) printf("[%d] " fmt "\n", ++phase, __VA_ARGS__)
@@ -625,8 +782,8 @@ int vi_cmd_compute_test(rg_dev *d, const rg_ident *id, int argc, char **argv) {
   if ((r = vi_gmc_init(&v, &g, rg_dma_bus(&ctrl, 0x11000))) || (r = vi_gart_map(&v, &g, &ctrl, &ctrl_gpu))) goto out;
 
   if ((r = vi_gfx_compute_init(&v))) goto out;
-  printf("GFX:          golden registers, VMID0 SH_MEM, RLC resumed (RLC_CNTL 0x%08x), doorbells on (BAR2 %llu MB)\n",
-         vi_rreg(&v, mmRLC_CNTL), (unsigned long long)(bar2 >> 20));
+  printf("GFX:          up (RLC_CNTL 0x%08x), doorbells on (BAR2 %llu MB)\n", vi_rreg(&v, mmRLC_CNTL),
+         (unsigned long long)(bar2 >> 20));
 
   /* VRAM for the queue, inside BAR0: ring 64 KB | MQD 4 KB | EOP 4 KB | writeback 4 KB */
   const uint64_t V_RING = VI_VRAM_FREE, V_MQD = V_RING + 0x10000, V_EOP = V_MQD + 0x1000, V_WB = V_EOP + 0x1000;
@@ -698,7 +855,7 @@ int vi_cmd_compute_test(rg_dev *d, const rg_ident *id, int argc, char **argv) {
   }
   struct { uint64_t a, b, c; uint32_t n, pad; } karg;
   for (int pass = 0; pass < 2; pass++) {
-    bool vram = pass == 1;
+    bool vram = pass == 0; /* VRAM first: it does not depend on the GART path to host memory */
     if (vram) { /* inputs through BAR0; the output pre-filled so stale results cannot pass */
       memset(buf, 0xFF, bytes);
       if ((r = vi_vram_write(&v, V_A, A, bytes)) || (r = vi_vram_write(&v, V_B, B, bytes)) ||

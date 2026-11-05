@@ -85,6 +85,17 @@ int vi_vram_zero(vi_dev *v, uint64_t off, size_t len);
 #define VI_UCODE_CP_MEC 0x040u
 #define VI_UCODE_RLC_G  0x400u
 
+/* The engine images, placed in VRAM as amdgpu_ucode_init_bo() lays them out:
+ * SDMA0, SDMA1, CE, PFP, ME, MEC (+ its jump table), RLC. */
+#define VI_UCODE_IMAGES 7
+typedef struct {
+  amd_fw fw[VI_UCODE_IMAGES];
+  uint64_t off[VI_UCODE_IMAGES]; /* VRAM offset of each image */
+  uint64_t jt_off, end;           /* the MEC jump table's copy; first byte past the images */
+} vi_ucode_set;
+int vi_ucode_place(vi_dev *v, vi_ucode_set *u, const char *fw_dir);
+void vi_ucode_free(vi_ucode_set *u);
+
 bool vi_smc_running(vi_dev *v);                       /* smu7_is_smc_ram_running() */
 int vi_smu_ucode_status(vi_dev *v, uint32_t *status); /* UcodeLoadStatus; -ENODEV if the SMC firmware is not up */
 int vi_temp_c(vi_dev *v);                             /* GPU temperature in degrees C */
@@ -162,6 +173,12 @@ typedef struct {
 /* gfx_v8_0_hw_init() for compute: golden registers, VMID0 shader memory
  * config, RLC resume, doorbells. Needs the SMU-loaded RLC and MEC microcode. */
 int vi_gfx_compute_init(vi_dev *v);
+/* gfx_v8_0_set_safe_mode() / unset_safe_mode(); no-op if the RLC is not running */
+void vi_rlc_safe_mode(vi_dev *v, bool enter);
+/* rawgpu's per-power-cycle state, in reserved VRAM: GFX brought up already?
+ * post, mc-load and gfx-reset clear it. */
+#define VI_VRAM_STATE (21ull << 20)
+void vi_state_clear(vi_dev *v);
 int vi_gfx_cu_count(vi_dev *v); /* active compute units */
 /* Loads ME1 pipe 0 queue 0 from an MQD and activates it. All four areas
  * must be 256-byte aligned; eop is GFX8_MEC_HPD_SIZE (4 KB). */

@@ -367,13 +367,10 @@ const char *vi_smc_fw_name(const rg_dev *d, bool hard_key) {
 
 /* ---- engine microcode ---- */
 
-typedef struct {
-  amd_fw fw[NIMG];
-  uint64_t off[NIMG]; /* VRAM offset of each image; the MEC jump table follows its image */
-  uint64_t jt_off, end;
-} ucode_set;
+_Static_assert(NIMG == VI_UCODE_IMAGES, "image list");
+typedef vi_ucode_set ucode_set;
 
-static void ucode_free(ucode_set *u) {
+void vi_ucode_free(ucode_set *u) {
   for (int i = 0; i < NIMG; i++) amd_fw_free(&u->fw[i]);
 }
 
@@ -383,7 +380,7 @@ static uint32_t jt_size(const amd_fw *f) { return amd_fw_hdr32(f, 40); }
 
 /* amdgpu_ucode_init_bo(): each image page-aligned, with a copy of the MEC jump
  * table after the MEC image (amdgpu_ucode_patch_jt()). Writes them into VRAM. */
-static int ucode_place(vi_dev *v, ucode_set *u, const char *dir) {
+int vi_ucode_place(vi_dev *v, ucode_set *u, const char *dir) {
   memset(u, 0, sizeof *u);
   int r;
   for (int i = 0; i < NIMG; i++)
@@ -460,7 +457,7 @@ static int load_ucodes(vi_dev *v, ucode_set *u, const char *fw_dir, uint32_t *st
   uint32_t status_addr = soft + offsetof(smu74_soft_registers, UcodeLoadStatus);
   uint64_t vram_mc = (uint64_t)(vi_rreg(v, mmMC_VM_FB_LOCATION) & 0xFFFF) << 24; /* as vi_gmc_init() */
 
-  int r = ucode_place(v, u, fw_dir);
+  int r = vi_ucode_place(v, u, fw_dir);
   if (r) return r;
   smu_toc toc;
   build_toc(&toc, u, vram_mc);
@@ -584,7 +581,7 @@ int vi_cmd_smc_load(rg_dev *d, const rg_ident *id, int argc, char **argv) {
   printf("temperature:  %d C\n", vi_temp_c(&v));
 
 out:
-  ucode_free(&u);
+  vi_ucode_free(&u);
   amd_fw_free(&smc);
   if (v.trace) { fclose(v.trace); printf("trace: %s\n", trace_path); }
   if (!r) r = v.err;

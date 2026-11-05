@@ -75,6 +75,10 @@ REGS = [
     "CC_GC_SHADER_ARRAY_CONFIG", "GC_USER_SHADER_ARRAY_CONFIG",
     # indirect spaces for powerplay (vi_pcie_rreg(), vi_didt_rreg(), vi_gc_cac_rreg())
     "PCIE_INDEX", "PCIE_DATA", "DIDT_IND_INDEX", "DIDT_IND_DATA", "GC_CAC_IND_INDEX", "GC_CAC_IND_DATA",
+    "DIDT_SQ_CTRL0", "DIDT_DB_CTRL0", "DIDT_TD_CTRL0", "DIDT_TCP_CTRL0",
+    # wave debug (gfx_v8_0_read_wave_data())
+    "SQ_IND_INDEX", "SQ_IND_DATA", "SQ_WAVE_STATUS", "SQ_WAVE_PC_LO", "SQ_WAVE_PC_HI", "SQ_WAVE_HW_ID",
+    "SQ_WAVE_TRAPSTS", "SQ_WAVE_IB_STS", "SQ_WAVE_INST_DW0", "GMCON_DEBUG",
     "FEATURE_STATUS", "PWR_SVI2_STATUS", "TARGET_AND_CURRENT_PROFILE_INDEX", "TARGET_AND_CURRENT_PROFILE_INDEX_1",
     # MC sequencer firmware (gmc_v8_0_polaris_mc_load_microcode())
     "MC_SEQ_IO_DEBUG_INDEX", "MC_SEQ_IO_DEBUG_DATA", "MC_SEQ_SUP_PGM",

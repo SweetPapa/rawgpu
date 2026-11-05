@@ -17,6 +17,7 @@
 #define PP_MCLK_DPM_MASK 0x2u
 #define PP_SCLK_DEEP_SLEEP_MASK 0x8u
 #define PP_ULV_MASK 0x100u
+#define RG_DROP_DIDT 0x80000000u /* not a ppfeaturemask bit: rawgpu's --no-didt */
 #define PP_PCIE_DPM_MASK 0x4u
 #define PP_AVFS_MASK 0x40000u
 
@@ -85,12 +86,45 @@ static uint32_t vram_width(vi_dev *v) {
 }
 
 typedef struct {
-  vi_dev v;
+  vi_dev v;          /* must stay first: the callbacks get a dpm_ctx * as their vi_dev * */
   rg_atom *atom;
   rg_pp *pp;
+  amd_fw smc;        /* the SMC image, for smu7_upload_smu_firmware_image() */
+  vi_ucode_set uc;   /* the engine images, once powerplay asks for them */
+  uint64_t vram_mc;  /* MC address of VRAM offset 0 */
+  bool smc_was_up;   /* the SMC already ran its firmware (`rawgpu smc-load`) */
 } dpm_ctx;
 
-static int dpm_open(dpm_ctx *c, rg_dev *d, const rg_ident *id, int verbosity, bool need_smc, uint32_t drop_features) {
+/* memcpy_toio() into an SMU buffer: MC address -> BAR0 offset, then HDP flush */
+static void h_rlc_safe_mode(void *ctx, bool enter) { vi_rlc_safe_mode(ctx, enter); }
+
+static int h_vram_write(void *ctx, uint64_t mc, const void *src, size_t len) {
+  dpm_ctx *c = ctx;
+  if (mc < c->vram_mc || mc - c->vram_mc + len > (256ull << 20)) return -EINVAL;
+  int r = vi_vram_write(&c->v, mc - c->vram_mc, src, len);
+  vi_hdp_flush(&c->v);
+  return r ? r : c->v.err;
+}
+
+/* amdgpu_ucode_init_bo(): the same layout `rawgpu smc-load` uses */
+static int h_ucode_init_bo(void *ctx, rg_pp_ucode out[RG_PP_UC_COUNT]) {
+  dpm_ctx *c = ctx;
+  _Static_assert(RG_PP_UC_COUNT == VI_UCODE_IMAGES, "image lists");
+  int r = vi_ucode_place(&c->v, &c->uc, NULL);
+  if (r) return r;
+  vi_hdp_flush(&c->v);
+  for (int i = 0; i < VI_UCODE_IMAGES; i++) {
+    const amd_fw *f = &c->uc.fw[i];
+    out[i] = (rg_pp_ucode){.mc = c->vram_mc + c->uc.off[i], .ucode_bytes = f->ucode_dw * 4,
+                           .ucode_version = f->ucode_version, .feature_version = amd_fw_hdr32(f, 32),
+                           .jt_offset = amd_fw_hdr32(f, 36), .jt_size = amd_fw_hdr32(f, 40), .image = f->ucode};
+  }
+  printf("microcode:    7 images placed at VRAM +%llu MB for the SMU (amdgpu_ucode_init_bo())\n",
+         (unsigned long long)(VI_VRAM_UCODE >> 20));
+  return c->v.err;
+}
+
+static int dpm_open(dpm_ctx *c, rg_dev *d, const rg_ident *id, int verbosity, bool for_hw, uint32_t drop_features) {
   memset(c, 0, sizeof *c);
   if (!id->chip || strcmp(id->chip, "POLARIS10")) {
     fprintf(stderr, "rawgpu: power management is only wired up for POLARIS10 (this is %s)\n", id->chip ? id->chip : "?");
@@ -104,11 +138,8 @@ static int dpm_open(dpm_ctx *c, rg_dev *d, const rg_ident *id, int verbosity, bo
     if (!v->err) fprintf(stderr, "rawgpu: card is not posted; run `rawgpu post`, then `rawgpu smc-load`\n");
     return v->err ? v->err : -EIO;
   }
-  if (need_smc && (vi_smu_ucode_status(v, &status) || !status)) {
-    if (!v->err) fprintf(stderr, "rawgpu: the SMC is not running its firmware; run `rawgpu smc-load` first\n");
-    return v->err ? v->err : -EIO;
-  }
-  if (need_smc) { /* amdgpu loads the MC firmware before power management starts (gmc_v8_0_hw_init()) */
+  c->smc_was_up = !vi_smu_ucode_status(v, &status) && status;
+  if (for_hw) { /* amdgpu loads the MC firmware before power management starts (gmc_v8_0_hw_init()) */
     amd_fw mc;
     if ((r = amd_fw_load(&mc, NULL, vi_mc_fw_name(d)))) return r;
     uint32_t want = mc.ucode_version, have = vi_mc_ucode_version(v);
@@ -122,8 +153,9 @@ static int dpm_open(dpm_ctx *c, rg_dev *d, const rg_ident *id, int verbosity, bo
   }
   if (!(c->atom = vi_atom_open(d, NULL, false))) return -EIO;
 
-  rg_pp_host h = {.ctx = v, .rreg = h_rreg, .wreg = h_wreg, .rind = h_rind, .wind = h_wind, .delay_us = h_delay,
-                  .err = h_err, .verbosity = verbosity};
+  rg_pp_host h = {.ctx = c, .rreg = h_rreg, .wreg = h_wreg, .rind = h_rind, .wind = h_wind, .delay_us = h_delay,
+                  .err = h_err, .vram_write = h_vram_write, .ucode_init_bo = h_ucode_init_bo,
+                  .rlc_safe_mode = h_rlc_safe_mode, .no_didt = (drop_features & RG_DROP_DIDT) != 0, .verbosity = verbosity};
   size_t bios_len;
   h.atom_context = rg_atom_context(c->atom);
   h.bios = rg_atom_bios(c->atom, &bios_len);
@@ -134,21 +166,24 @@ static int dpm_open(dpm_ctx *c, rg_dev *d, const rg_ident *id, int verbosity, bo
   h.subsys_device = d->subsys_device;
   h.is_kicker = vi_smc_is_kicker(d);
   bool hard = REG_GET_FIELD(vi_rsmc(v, ixSMU_FIRMWARE), SMU_FIRMWARE, SMU_SEL);
-  amd_fw smc;
-  if ((r = amd_fw_load(&smc, NULL, vi_smc_fw_name(d, hard)))) return r;
-  h.smc_version = smc.ucode_version;
-  amd_fw_free(&smc);
+  if ((r = amd_fw_load(&c->smc, NULL, vi_smc_fw_name(d, hard)))) return r;
+  h.smc_version = c->smc.ucode_version;
+  h.smc_image = c->smc.ucode;
+  h.smc_bytes = c->smc.ucode_dw * 4;
+  h.smc_start_addr = amd_fw_hdr32(&c->smc, 32); /* smc_firmware_header_v1_0 ucode_start_addr */
   uint32_t ref = 0;
   if (rg_atom_ref_clock(c->atom, &ref) || !ref) { fprintf(stderr, "rawgpu: no reference clock in FirmwareInfo\n"); return -EIO; }
   h.xclk = xclk(v, ref);
   uint64_t vram_mc = (uint64_t)(vi_rreg(v, mmMC_VM_FB_LOCATION) & 0xFFFF) << 24;
+  c->vram_mc = vram_mc;
   h.smu_toc_mc = vram_mc + VI_VRAM_SMU_TOC;
   h.smu_buf_mc = vram_mc + VI_VRAM_SMU_BUF;
-  /* amdgpu's defaults, less PCIe DPM (the link runs through a Thunderbolt
-   * tunnel; retraining it is not worth the risk) and AVFS (it needs the
-   * boot-time calibration in polaris10_start_smu(), which `rawgpu smc-load`
-   * does not run). Without AVFS the SMC uses the VBIOS's EVV voltages. */
-  h.feature_mask = PP_FEATURE_MASK_DEFAULT & ~(PP_PCIE_DPM_MASK | PP_AVFS_MASK | drop_features);
+  /* amdgpu's defaults, less PCIe DPM: the link runs through a Thunderbolt
+   * tunnel, and retraining it is not worth the risk. AVFS stays on when
+   * amdgpu's own polaris10_start_smu() starts the SMC (it stages AVFS there);
+   * an SMC that `rawgpu smc-load` started never had that, so AVFS goes off. */
+  if (c->smc_was_up) drop_features |= PP_AVFS_MASK;
+  h.feature_mask = PP_FEATURE_MASK_DEFAULT & ~(PP_PCIE_DPM_MASK | (drop_features & ~RG_DROP_DIDT));
   int cur_gen = 0, cur_width = 0, max_gen = 0, max_width = 0;
   rg_pci_link(d, &cur_gen, &cur_width, &max_gen, &max_width);
   h.link_gen = cur_gen;
@@ -162,15 +197,19 @@ static int dpm_open(dpm_ctx *c, rg_dev *d, const rg_ident *id, int verbosity, bo
   printf("card:         %s kicker part, SMC firmware 0x%08x, reference clock %.2f MHz, PCIe Gen%d x%d (GPU: Gen%d), "
          "%u-bit GDDR5, %u CUs\n", h.is_kicker ? "a" : "not a", h.smc_version, h.xclk / 100.0, cur_gen, cur_width,
          max_gen, h.vram_width, h.cu_count);
-  printf("features:     ppfeaturemask 0x%08x (amdgpu's 0x%08x without PCIe DPM and AVFS%s%s%s)\n", h.feature_mask,
-         PP_FEATURE_MASK_DEFAULT, drop_features & PP_MCLK_DPM_MASK ? ", memory DPM" : "",
-         drop_features & PP_SCLK_DEEP_SLEEP_MASK ? ", deep sleep" : "", drop_features & PP_ULV_MASK ? ", ULV" : "");
+  printf("features:     ppfeaturemask 0x%08x (amdgpu's 0x%08x without PCIe DPM%s%s%s%s)\n", h.feature_mask,
+         PP_FEATURE_MASK_DEFAULT, drop_features & PP_AVFS_MASK ? ", AVFS" : "",
+         drop_features & PP_MCLK_DPM_MASK ? ", memory DPM" : "", drop_features & PP_SCLK_DEEP_SLEEP_MASK ? ", deep sleep" : "",
+         drop_features & PP_ULV_MASK ? ", ULV" : "");
+  if (drop_features & RG_DROP_DIDT) printf("              di/dt limiters (SQ/DB/TD/TCP ramping) left off\n");
   return rg_pp_open(&c->pp, &h);
 }
 
 static void dpm_close(dpm_ctx *c) {
   rg_pp_close(c->pp);
   if (c->atom) rg_atom_close(c->atom);
+  vi_ucode_free(&c->uc);
+  amd_fw_free(&c->smc);
 }
 
 static int parse_v(int argc, char **argv, int *verbosity) {
@@ -216,6 +255,7 @@ int vi_cmd_dpm_enable(rg_dev *d, const rg_ident *id, int argc, char **argv) {
     else if (!strcmp(argv[i], "--no-mclk")) drop |= PP_MCLK_DPM_MASK; /* engine DPM only: memory stays at boot clock */
     else if (!strcmp(argv[i], "--no-deep-sleep")) drop |= PP_SCLK_DEEP_SLEEP_MASK; /* no SCLK divider at idle */
     else if (!strcmp(argv[i], "--no-ulv")) drop |= PP_ULV_MASK;                     /* no ultra-low voltage at idle */
+    else if (!strcmp(argv[i], "--no-didt")) drop |= RG_DROP_DIDT;
     else if (!strcmp(argv[i], "--trace") && i + 1 < argc) trace_path = argv[++i];
     else if (!strcmp(argv[i], "--level") && i + 1 < argc) {
       const char *l = argv[++i];
@@ -229,10 +269,31 @@ int vi_cmd_dpm_enable(rg_dev *d, const rg_ident *id, int argc, char **argv) {
   if (!r) {
     printf("before:       temperature %d C\n", vi_temp_c(&c.v));
     fflush(stdout);
+    if (!c.smc_was_up) { /* pp_dpm_load_fw(): amdgpu starts the SMC and loads the engine images itself */
+      double t1 = vi_now();
+      r = rg_pp_start_smu(c.pp);
+      uint32_t st = 0;
+      vi_smu_ucode_status(&c.v, &st);
+      printf("start_smu:    %s after %.2f s: SMC PC 0x%08x, UcodeLoadStatus 0x%08x\n", r ? "FAILED" : "done",
+             vi_now() - t1, vi_rsmc(&c.v, ixSMC_PC_C), st);
+      for (int me = 0; !r && me < 2; me++) { /* the same check smc-load makes */
+        uint32_t first = 0;
+        int bad = vi_sdma_check_ucode(&c.v, me, &c.uc.fw[me], &first);
+        printf("SDMA%d ucode:  %s\n", me, bad == 0 ? "microcode RAM matches the image" : "MISMATCH");
+        if (bad) r = bad < 0 ? bad : -EIO;
+      }
+    } else {
+      printf("start_smu:    skipped: the SMC already runs (smc-load), so AVFS stays off\n");
+    }
+    if (r) goto done;
     double t0 = vi_now();
     r = rg_pp_hw_init(c.pp);
     printf("hwmgr_hw_init: %s after %.2f s (FEATURE_STATUS 0x%08x)\n", r ? "FAILED" : "done", vi_now() - t0,
            vi_rsmc(&c.v, ixFEATURE_STATUS));
+  }
+  if (!r) { /* amdgpu's IP order: gfx_v8_0_hw_init() right after powerplay's */
+    r = vi_gfx_compute_init(&c.v);
+    printf("GFX:          %s (RLC_CNTL 0x%08x)\n", r ? "FAILED" : "up", vi_rreg(&c.v, mmRLC_CNTL));
   }
   if (!r) {
     print_sensors(c.pp, "DPM on:");
@@ -242,8 +303,46 @@ int vi_cmd_dpm_enable(rg_dev *d, const rg_ident *id, int argc, char **argv) {
       if (!r) print_sensors(c.pp, "now:");
     }
   }
+done:
   if (c.v.trace) { fclose(c.v.trace); c.v.trace = NULL; printf("trace: %s\n", trace_path); }
   dpm_close(&c);
   if (r) fprintf(stderr, "rawgpu: dpm-enable failed (%d)\n", r);
   return r;
+}
+
+/* `rawgpu didt [off]`: the di/dt current limiters smu7_enable_didt_config()
+ * turns on (SQ, DB, TD, TCP), GRBM busy state, and the host API's compute
+ * fence in VRAM. `off` clears DIDT_CTRL_EN, as smu7_enable_didt(false) does. */
+int vi_cmd_didt(rg_dev *d, const rg_ident *id, int argc, char **argv) {
+  bool off = argc == 1 && !strcmp(argv[0], "off");
+  if (argc && !off) return -EINVAL;
+  vi_dev v;
+  int r = vi_open(&v, d);
+  if (r) return r;
+  static const struct { const char *name; uint32_t ix; } blk[] = {
+    {"SQ", ixDIDT_SQ_CTRL0}, {"DB", ixDIDT_DB_CTRL0}, {"TD", ixDIDT_TD_CTRL0}, {"TCP", ixDIDT_TCP_CTRL0},
+  };
+  for (int pass = 0; pass < (off ? 2 : 1); pass++) {
+    if (pass) {
+      for (size_t i = 0; i < 4; i++) {
+        vi_wreg(&v, mmDIDT_IND_INDEX, blk[i].ix);
+        uint32_t x = vi_rreg(&v, mmDIDT_IND_DATA);
+        vi_wreg(&v, mmDIDT_IND_INDEX, blk[i].ix);
+        vi_wreg(&v, mmDIDT_IND_DATA, x & ~DIDT_SQ_CTRL0__DIDT_CTRL_EN_MASK);
+      }
+      vi_udelay(100000);
+      printf("cleared DIDT_CTRL_EN; 100 ms later:\n");
+    }
+    printf("DIDT CTRL0:  ");
+    for (size_t i = 0; i < 4; i++) {
+      vi_wreg(&v, mmDIDT_IND_INDEX, blk[i].ix);
+      uint32_t x = vi_rreg(&v, mmDIDT_IND_DATA);
+      printf(" %s 0x%08x (%s)", blk[i].name, x, x & DIDT_SQ_CTRL0__DIDT_CTRL_EN_MASK ? "on" : "off");
+    }
+    uint32_t fence = 0; /* amd_vi_ctx.c: compute writeback at VI_VRAM_FREE + 0x12000, fence at +16 */
+    vi_hdp_invalidate(&v);
+    d->ops->mmio_read(d, VI_VRAM_BAR, VI_VRAM_FREE + 0x12000 + 16, &fence, 4);
+    printf("\nGRBM_STATUS 0x%08x, host-API compute fence %u\n", vi_rreg(&v, mmGRBM_STATUS), fence);
+  }
+  return v.err;
 }

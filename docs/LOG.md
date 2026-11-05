@@ -169,6 +169,45 @@ card died within 192 KB.
     including the AVFS BTC, instead of rawgpu's smc-load. That removes the
     biggest remaining difference from Linux.
 
+**Fifth attempt: amdgpu's own SMC start. The wedge is gone.** After `post`
+and `mc-load`, `dpm-enable` started the SMC itself, through
+`polaris10_start_smu()`: the protected-mode upload, AVFS staging, then the
+microcode load through rawgpu's `cgs_get_firmware_info()` and
+`amdgpu_ucode_init_bo()`.
+
+- `start_smu`: 0.10 s, UcodeLoadStatus `0x5fe`, both SDMA RAMs match.
+  (`avfs_btc_param` is never set in amdgpu, so the BTC message itself is
+  never sent.)
+- `FEATURE_STATUS` `0x0001e003`: bit 16, **AVS_ON**, is new.
+- Idle: 750 mV, 288-300 MHz, 400 MHz, 5.0 W.
+- **`vram-test` passed under DPM.** BAR writes ran at 18 MB/s.
+  - Afterwards the SMC was at engine level 6 (1296 MHz) with VDDC at
+    1100 mV: DPM followed the load.
+  - So running with AVFS off was what broke host access to VRAM.
+- `sdma-test --vram-only` and `sdma-test 1` passed: host writes, reads, round
+  trip and fill. VRAM -> VRAM ran at 8.5 GB/s.
+- **New problem: shader stores to host memory never complete.**
+  - `bench-compute`'s clock probe kernel never fenced.
+  - `rawgpu waves` (new) found its wave at `s_endpgm` with `IB_STS` VM_CNT
+    = 2: its two stores to the host buffer were still outstanding. SDMA's
+    host writes work, so the GART and PCIe are fine; the shader path through
+    the texture units is not.
+  - The SMC sat at engine level 7 (1545 MHz, 1156 mV). The card reached
+    57-58 C while stuck.
+- DPM had programmed the SQ/DB/TD/TCP di/dt limiters (880 DIDT writes).
+  - Clearing `DIDT_CTRL_EN` (`rawgpu didt off`, new) did not release the wave.
+  - `rawgpu gfx-reset` (new, `gfx_v8_0_soft_reset()`) cleared the waves, but
+    the HQD would not deactivate afterwards, so compute needs a power cycle.
+- **Two differences from amdgpu, both now fixed:**
+  - amdgpu programs DIDT inside RLC safe mode, because Polaris 10's
+    `cg_flags` include GFX CGCG/MGCG. rawgpu's glue had made safe mode a
+    no-op. It now runs `gfx_v8_0_set_safe_mode()`.
+  - amdgpu brings GFX up once, right after powerplay. rawgpu reset the RLC in
+    every process. Now `dpm-enable` brings GFX up after `hwmgr_hw_init()`,
+    and a marker in VRAM (`VI_VRAM_STATE`) stops later processes from
+    resetting the RLC.
+  - `dpm-enable --no-didt` exists, in case the stores still hang.
+
 ## 2026-11-04: stage 5 begins: host API, LDS, and what boot clocks give
 
 Same setup. `rawgpu bench-compute` (`src/amd_vi_bench.c`) runs entirely on

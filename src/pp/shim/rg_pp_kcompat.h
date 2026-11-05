@@ -78,7 +78,8 @@ static inline void *kmemdup(const void *src, size_t len, int gfp) {
   if (p) memcpy(p, src, len);
   return p;
 }
-#define memcpy_toio(dst, src, n) memcpy((dst), (src), (n))
+void rg_pp_memcpy_toio(void *dst, const void *src, size_t n); /* rg_pp.c: writes through to VRAM */
+#define memcpy_toio(dst, src, n) rg_pp_memcpy_toio((dst), (src), (n))
 #define memcpy_fromio(dst, src, n) memcpy((dst), (src), (n))
 #define memset_io(dst, c, n) memset((dst), (c), (n))
 #define struct_size(p, member, n) (sizeof(*(p)) + (size_t)(n) * sizeof((p)->member[0]))

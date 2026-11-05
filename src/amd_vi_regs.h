@@ -1511,6 +1511,18 @@
 #define DB_DEBUG2__ENABLE_SUBTILE_GROUPING_MASK              0x8000
 #define DB_DEBUG2__ENABLE_SUBTILE_GROUPING__SHIFT            0xf
 
+#define ixDIDT_DB_CTRL0                                      0x20  /* gca/gfx_8_0 */
+#define DIDT_DB_CTRL0__DIDT_CLK_EN_OVERRIDE_MASK             0x20
+#define DIDT_DB_CTRL0__DIDT_CLK_EN_OVERRIDE__SHIFT           0x5
+#define DIDT_DB_CTRL0__DIDT_CTRL_EN_MASK                     0x1
+#define DIDT_DB_CTRL0__DIDT_CTRL_EN__SHIFT                   0x0
+#define DIDT_DB_CTRL0__DIDT_CTRL_RST_MASK                    0x10
+#define DIDT_DB_CTRL0__DIDT_CTRL_RST__SHIFT                  0x4
+#define DIDT_DB_CTRL0__PHASE_OFFSET_MASK                     0xc
+#define DIDT_DB_CTRL0__PHASE_OFFSET__SHIFT                   0x2
+#define DIDT_DB_CTRL0__USE_REF_CLOCK_MASK                    0x2
+#define DIDT_DB_CTRL0__USE_REF_CLOCK__SHIFT                  0x1
+
 #define mmDIDT_IND_DATA                                      0x3281  /* gca/gfx_8_0 */
 #define DIDT_IND_DATA__DIDT_IND_DATA_MASK                    0xffffffff
 #define DIDT_IND_DATA__DIDT_IND_DATA__SHIFT                  0x0
@@ -1518,6 +1530,54 @@
 #define mmDIDT_IND_INDEX                                     0x3280  /* gca/gfx_8_0 */
 #define DIDT_IND_INDEX__DIDT_IND_INDEX_MASK                  0xffffffff
 #define DIDT_IND_INDEX__DIDT_IND_INDEX__SHIFT                0x0
+
+#define ixDIDT_SQ_CTRL0                                      0x0  /* gca/gfx_8_0 */
+#define DIDT_SQ_CTRL0__DIDT_CLK_EN_OVERRIDE_MASK             0x20
+#define DIDT_SQ_CTRL0__DIDT_CLK_EN_OVERRIDE__SHIFT           0x5
+#define DIDT_SQ_CTRL0__DIDT_CTRL_EN_MASK                     0x1
+#define DIDT_SQ_CTRL0__DIDT_CTRL_EN__SHIFT                   0x0
+#define DIDT_SQ_CTRL0__DIDT_CTRL_RST_MASK                    0x10
+#define DIDT_SQ_CTRL0__DIDT_CTRL_RST__SHIFT                  0x4
+#define DIDT_SQ_CTRL0__DIDT_MAX_STALLS_ALLOWED_HI_MASK       0xfc0
+#define DIDT_SQ_CTRL0__DIDT_MAX_STALLS_ALLOWED_HI__SHIFT     0x6
+#define DIDT_SQ_CTRL0__DIDT_MAX_STALLS_ALLOWED_LO_MASK       0x3f000
+#define DIDT_SQ_CTRL0__DIDT_MAX_STALLS_ALLOWED_LO__SHIFT     0xc
+#define DIDT_SQ_CTRL0__PHASE_OFFSET_MASK                     0xc
+#define DIDT_SQ_CTRL0__PHASE_OFFSET__SHIFT                   0x2
+#define DIDT_SQ_CTRL0__USE_REF_CLOCK_MASK                    0x2
+#define DIDT_SQ_CTRL0__USE_REF_CLOCK__SHIFT                  0x1
+
+#define ixDIDT_TCP_CTRL0                                     0x60  /* gca/gfx_8_0 */
+#define DIDT_TCP_CTRL0__DIDT_CLK_EN_OVERRIDE_MASK            0x20
+#define DIDT_TCP_CTRL0__DIDT_CLK_EN_OVERRIDE__SHIFT          0x5
+#define DIDT_TCP_CTRL0__DIDT_CTRL_EN_MASK                    0x1
+#define DIDT_TCP_CTRL0__DIDT_CTRL_EN__SHIFT                  0x0
+#define DIDT_TCP_CTRL0__DIDT_CTRL_RST_MASK                   0x10
+#define DIDT_TCP_CTRL0__DIDT_CTRL_RST__SHIFT                 0x4
+#define DIDT_TCP_CTRL0__DIDT_MAX_STALLS_ALLOWED_HI_MASK      0xfc0
+#define DIDT_TCP_CTRL0__DIDT_MAX_STALLS_ALLOWED_HI__SHIFT    0x6
+#define DIDT_TCP_CTRL0__DIDT_MAX_STALLS_ALLOWED_LO_MASK      0x3f000
+#define DIDT_TCP_CTRL0__DIDT_MAX_STALLS_ALLOWED_LO__SHIFT    0xc
+#define DIDT_TCP_CTRL0__PHASE_OFFSET_MASK                    0xc
+#define DIDT_TCP_CTRL0__PHASE_OFFSET__SHIFT                  0x2
+#define DIDT_TCP_CTRL0__USE_REF_CLOCK_MASK                   0x2
+#define DIDT_TCP_CTRL0__USE_REF_CLOCK__SHIFT                 0x1
+
+#define ixDIDT_TD_CTRL0                                      0x40  /* gca/gfx_8_0 */
+#define DIDT_TD_CTRL0__DIDT_CLK_EN_OVERRIDE_MASK             0x20
+#define DIDT_TD_CTRL0__DIDT_CLK_EN_OVERRIDE__SHIFT           0x5
+#define DIDT_TD_CTRL0__DIDT_CTRL_EN_MASK                     0x1
+#define DIDT_TD_CTRL0__DIDT_CTRL_EN__SHIFT                   0x0
+#define DIDT_TD_CTRL0__DIDT_CTRL_RST_MASK                    0x10
+#define DIDT_TD_CTRL0__DIDT_CTRL_RST__SHIFT                  0x4
+#define DIDT_TD_CTRL0__DIDT_MAX_STALLS_ALLOWED_HI_MASK       0xfc0
+#define DIDT_TD_CTRL0__DIDT_MAX_STALLS_ALLOWED_HI__SHIFT     0x6
+#define DIDT_TD_CTRL0__DIDT_MAX_STALLS_ALLOWED_LO_MASK       0x3f000
+#define DIDT_TD_CTRL0__DIDT_MAX_STALLS_ALLOWED_LO__SHIFT     0xc
+#define DIDT_TD_CTRL0__PHASE_OFFSET_MASK                     0xc
+#define DIDT_TD_CTRL0__PHASE_OFFSET__SHIFT                   0x2
+#define DIDT_TD_CTRL0__USE_REF_CLOCK_MASK                    0x2
+#define DIDT_TD_CTRL0__USE_REF_CLOCK__SHIFT                  0x1
 
 #define ixFEATURE_STATUS                                     0x3f010  /* smu/smu_7_1_3 */
 #define FEATURE_STATUS__ACP_DPM_ON_MASK                      0x40
@@ -1602,6 +1662,20 @@
 #define mmGC_USER_SHADER_ARRAY_CONFIG                        0x2270  /* gca/gfx_8_0 */
 #define GC_USER_SHADER_ARRAY_CONFIG__INACTIVE_CUS_MASK       0xffff0000
 #define GC_USER_SHADER_ARRAY_CONFIG__INACTIVE_CUS__SHIFT     0x10
+
+#define mmGMCON_DEBUG                                        0xd5f  /* gmc/gmc_8_1 */
+#define GMCON_DEBUG__GFX_CLEAR_MASK                          0x2
+#define GMCON_DEBUG__GFX_CLEAR__SHIFT                        0x1
+#define GMCON_DEBUG__GFX_STALL_MASK                          0x1
+#define GMCON_DEBUG__GFX_STALL__SHIFT                        0x0
+#define GMCON_DEBUG__GMCON_DEBUG_RESERVED0_MASK              0x4
+#define GMCON_DEBUG__GMCON_DEBUG_RESERVED0__SHIFT            0x2
+#define GMCON_DEBUG__MISC_FLAGS_MASK                         0xffffff00
+#define GMCON_DEBUG__MISC_FLAGS__SHIFT                       0x8
+#define GMCON_DEBUG__SR_COMMIT_STATE_MASK                    0x8
+#define GMCON_DEBUG__SR_COMMIT_STATE__SHIFT                  0x3
+#define GMCON_DEBUG__STCTRL_ST_MASK                          0xf0
+#define GMCON_DEBUG__STCTRL_ST__SHIFT                        0x4
 
 #define mmGPU_HDP_FLUSH_DONE                                 0x1538  /* bif/bif_5_0 */
 #define GPU_HDP_FLUSH_DONE__CP0_MASK                         0x1
@@ -3269,6 +3343,136 @@
 #define SQ_CONFIG__REPLAY_SLEEP_CNT__SHIFT                   0x15
 #define SQ_CONFIG__UNUSED_MASK                               0xff
 #define SQ_CONFIG__UNUSED__SHIFT                             0x0
+
+#define mmSQ_IND_DATA                                        0x2379  /* gca/gfx_8_0 */
+#define SQ_IND_DATA__DATA_MASK                               0xffffffff
+#define SQ_IND_DATA__DATA__SHIFT                             0x0
+
+#define mmSQ_IND_INDEX                                       0x2378  /* gca/gfx_8_0 */
+#define SQ_IND_INDEX__AUTO_INCR_MASK                         0x1000
+#define SQ_IND_INDEX__AUTO_INCR__SHIFT                       0xc
+#define SQ_IND_INDEX__FORCE_READ_MASK                        0x2000
+#define SQ_IND_INDEX__FORCE_READ__SHIFT                      0xd
+#define SQ_IND_INDEX__INDEX_MASK                             0xffff0000
+#define SQ_IND_INDEX__INDEX__SHIFT                           0x10
+#define SQ_IND_INDEX__READ_TIMEOUT_MASK                      0x4000
+#define SQ_IND_INDEX__READ_TIMEOUT__SHIFT                    0xe
+#define SQ_IND_INDEX__SIMD_ID_MASK                           0x30
+#define SQ_IND_INDEX__SIMD_ID__SHIFT                         0x4
+#define SQ_IND_INDEX__THREAD_ID_MASK                         0xfc0
+#define SQ_IND_INDEX__THREAD_ID__SHIFT                       0x6
+#define SQ_IND_INDEX__UNINDEXED_MASK                         0x8000
+#define SQ_IND_INDEX__UNINDEXED__SHIFT                       0xf
+#define SQ_IND_INDEX__WAVE_ID_MASK                           0xf
+#define SQ_IND_INDEX__WAVE_ID__SHIFT                         0x0
+
+#define ixSQ_WAVE_HW_ID                                      0x14  /* gca/gfx_8_0 */
+#define SQ_WAVE_HW_ID__CU_ID_MASK                            0xf00
+#define SQ_WAVE_HW_ID__CU_ID__SHIFT                          0x8
+#define SQ_WAVE_HW_ID__ME_ID_MASK                            0xc0000000
+#define SQ_WAVE_HW_ID__ME_ID__SHIFT                          0x1e
+#define SQ_WAVE_HW_ID__PIPE_ID_MASK                          0xc0
+#define SQ_WAVE_HW_ID__PIPE_ID__SHIFT                        0x6
+#define SQ_WAVE_HW_ID__QUEUE_ID_MASK                         0x7000000
+#define SQ_WAVE_HW_ID__QUEUE_ID__SHIFT                       0x18
+#define SQ_WAVE_HW_ID__SE_ID_MASK                            0x6000
+#define SQ_WAVE_HW_ID__SE_ID__SHIFT                          0xd
+#define SQ_WAVE_HW_ID__SH_ID_MASK                            0x1000
+#define SQ_WAVE_HW_ID__SH_ID__SHIFT                          0xc
+#define SQ_WAVE_HW_ID__SIMD_ID_MASK                          0x30
+#define SQ_WAVE_HW_ID__SIMD_ID__SHIFT                        0x4
+#define SQ_WAVE_HW_ID__STATE_ID_MASK                         0x38000000
+#define SQ_WAVE_HW_ID__STATE_ID__SHIFT                       0x1b
+#define SQ_WAVE_HW_ID__TG_ID_MASK                            0xf0000
+#define SQ_WAVE_HW_ID__TG_ID__SHIFT                          0x10
+#define SQ_WAVE_HW_ID__VM_ID_MASK                            0xf00000
+#define SQ_WAVE_HW_ID__VM_ID__SHIFT                          0x14
+#define SQ_WAVE_HW_ID__WAVE_ID_MASK                          0xf
+#define SQ_WAVE_HW_ID__WAVE_ID__SHIFT                        0x0
+
+#define ixSQ_WAVE_IB_STS                                     0x17  /* gca/gfx_8_0 */
+#define SQ_WAVE_IB_STS__EXP_CNT_MASK                         0x70
+#define SQ_WAVE_IB_STS__EXP_CNT__SHIFT                       0x4
+#define SQ_WAVE_IB_STS__FIRST_REPLAY_MASK                    0x8000
+#define SQ_WAVE_IB_STS__FIRST_REPLAY__SHIFT                  0xf
+#define SQ_WAVE_IB_STS__LGKM_CNT_MASK                        0xf00
+#define SQ_WAVE_IB_STS__LGKM_CNT__SHIFT                      0x8
+#define SQ_WAVE_IB_STS__RCNT_MASK                            0xf0000
+#define SQ_WAVE_IB_STS__RCNT__SHIFT                          0x10
+#define SQ_WAVE_IB_STS__VALU_CNT_MASK                        0x7000
+#define SQ_WAVE_IB_STS__VALU_CNT__SHIFT                      0xc
+#define SQ_WAVE_IB_STS__VM_CNT_MASK                          0xf
+#define SQ_WAVE_IB_STS__VM_CNT__SHIFT                        0x0
+
+#define ixSQ_WAVE_INST_DW0                                   0x1a  /* gca/gfx_8_0 */
+#define SQ_WAVE_INST_DW0__INST_DW0_MASK                      0xffffffff
+#define SQ_WAVE_INST_DW0__INST_DW0__SHIFT                    0x0
+
+#define ixSQ_WAVE_PC_HI                                      0x19  /* gca/gfx_8_0 */
+#define SQ_WAVE_PC_HI__PC_HI_MASK                            0xff
+#define SQ_WAVE_PC_HI__PC_HI__SHIFT                          0x0
+
+#define ixSQ_WAVE_PC_LO                                      0x18  /* gca/gfx_8_0 */
+#define SQ_WAVE_PC_LO__PC_LO_MASK                            0xffffffff
+#define SQ_WAVE_PC_LO__PC_LO__SHIFT                          0x0
+
+#define ixSQ_WAVE_STATUS                                     0x12  /* gca/gfx_8_0 */
+#define SQ_WAVE_STATUS__ALLOW_REPLAY_MASK                    0x400000
+#define SQ_WAVE_STATUS__ALLOW_REPLAY__SHIFT                  0x16
+#define SQ_WAVE_STATUS__COND_DBG_SYS_MASK                    0x200000
+#define SQ_WAVE_STATUS__COND_DBG_SYS__SHIFT                  0x15
+#define SQ_WAVE_STATUS__COND_DBG_USER_MASK                   0x100000
+#define SQ_WAVE_STATUS__COND_DBG_USER__SHIFT                 0x14
+#define SQ_WAVE_STATUS__ECC_ERR_MASK                         0x20000
+#define SQ_WAVE_STATUS__ECC_ERR__SHIFT                       0x11
+#define SQ_WAVE_STATUS__EXECZ_MASK                           0x200
+#define SQ_WAVE_STATUS__EXECZ__SHIFT                         0x9
+#define SQ_WAVE_STATUS__EXPORT_RDY_MASK                      0x100
+#define SQ_WAVE_STATUS__EXPORT_RDY__SHIFT                    0x8
+#define SQ_WAVE_STATUS__HALT_MASK                            0x2000
+#define SQ_WAVE_STATUS__HALT__SHIFT                          0xd
+#define SQ_WAVE_STATUS__INST_ATC_MASK                        0x800000
+#define SQ_WAVE_STATUS__INST_ATC__SHIFT                      0x17
+#define SQ_WAVE_STATUS__IN_BARRIER_MASK                      0x1000
+#define SQ_WAVE_STATUS__IN_BARRIER__SHIFT                    0xc
+#define SQ_WAVE_STATUS__IN_TG_MASK                           0x800
+#define SQ_WAVE_STATUS__IN_TG__SHIFT                         0xb
+#define SQ_WAVE_STATUS__MUST_EXPORT_MASK                     0x8000000
+#define SQ_WAVE_STATUS__MUST_EXPORT__SHIFT                   0x1b
+#define SQ_WAVE_STATUS__PERF_EN_MASK                         0x80000
+#define SQ_WAVE_STATUS__PERF_EN__SHIFT                       0x13
+#define SQ_WAVE_STATUS__PRIV_MASK                            0x20
+#define SQ_WAVE_STATUS__PRIV__SHIFT                          0x5
+#define SQ_WAVE_STATUS__SCC_MASK                             0x1
+#define SQ_WAVE_STATUS__SCC__SHIFT                           0x0
+#define SQ_WAVE_STATUS__SKIP_EXPORT_MASK                     0x40000
+#define SQ_WAVE_STATUS__SKIP_EXPORT__SHIFT                   0x12
+#define SQ_WAVE_STATUS__SPI_PRIO_MASK                        0x6
+#define SQ_WAVE_STATUS__SPI_PRIO__SHIFT                      0x1
+#define SQ_WAVE_STATUS__TRAP_EN_MASK                         0x40
+#define SQ_WAVE_STATUS__TRAP_EN__SHIFT                       0x6
+#define SQ_WAVE_STATUS__TRAP_MASK                            0x4000
+#define SQ_WAVE_STATUS__TRAP__SHIFT                          0xe
+#define SQ_WAVE_STATUS__TTRACE_CU_EN_MASK                    0x8000
+#define SQ_WAVE_STATUS__TTRACE_CU_EN__SHIFT                  0xf
+#define SQ_WAVE_STATUS__TTRACE_EN_MASK                       0x80
+#define SQ_WAVE_STATUS__TTRACE_EN__SHIFT                     0x7
+#define SQ_WAVE_STATUS__USER_PRIO_MASK                       0x18
+#define SQ_WAVE_STATUS__USER_PRIO__SHIFT                     0x3
+#define SQ_WAVE_STATUS__VALID_MASK                           0x10000
+#define SQ_WAVE_STATUS__VALID__SHIFT                         0x10
+#define SQ_WAVE_STATUS__VCCZ_MASK                            0x400
+#define SQ_WAVE_STATUS__VCCZ__SHIFT                          0xa
+
+#define ixSQ_WAVE_TRAPSTS                                    0x13  /* gca/gfx_8_0 */
+#define SQ_WAVE_TRAPSTS__DP_RATE_MASK                        0xe0000000
+#define SQ_WAVE_TRAPSTS__DP_RATE__SHIFT                      0x1d
+#define SQ_WAVE_TRAPSTS__EXCP_CYCLE_MASK                     0x3f0000
+#define SQ_WAVE_TRAPSTS__EXCP_CYCLE__SHIFT                   0x10
+#define SQ_WAVE_TRAPSTS__EXCP_MASK                           0x1ff
+#define SQ_WAVE_TRAPSTS__EXCP__SHIFT                         0x0
+#define SQ_WAVE_TRAPSTS__SAVECTX_MASK                        0x400
+#define SQ_WAVE_TRAPSTS__SAVECTX__SHIFT                      0xa
 
 #define mmSRBM_GFX_CNTL                                      0x391  /* oss/oss_3_0 */
 #define SRBM_GFX_CNTL__MEID_MASK                             0xc
