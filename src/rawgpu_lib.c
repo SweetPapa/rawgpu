@@ -159,8 +159,8 @@ void rawgpu_close(rawgpu *g) {
 
 int rawgpu_get_info(rawgpu *g, rawgpu_info *info) {
   memset(info, 0, sizeof *info);
-  snprintf(info->name, sizeof info->name, "%s (%s), %04x:%04x rev %02x", g->id.gen_name, g->id.chip, g->d.vendor,
-           g->d.device, g->d.revision);
+  snprintf(info->name, sizeof info->name, "AMD %s, PCI %04x:%04x rev %02x, board %04x:%04x", g->id.chip, g->d.vendor,
+           g->d.device, g->d.revision, g->d.subsys_vendor, g->d.subsys_device);
   snprintf(info->arch, sizeof info->arch, "gfx803");
   info->compute_units = g->c.cus;
   info->wavefront_size = 64;
@@ -343,7 +343,7 @@ rawgpu_program *rawgpu_program_build(rawgpu *g, const char *source, const char *
   if (r) { fail(g, r, "cannot create the kernel cache %s", dir); return NULL; }
 
   uint64_t h = 0xcbf29ce484222325ull;
-  const char *salt = "rawgpu-kernel-cache-1 gfx803";
+  const char *salt = "rawgpu-kernel-cache-2 gfx803";
   h = fnv(h, salt, strlen(salt) + 1);
   h = fnv(h, clang, strlen(clang) + 1);
   h = fnv(h, libdir, strlen(libdir) + 1);
@@ -375,6 +375,7 @@ rawgpu_program *rawgpu_program_build(rawgpu *g, const char *source, const char *
   argv[n++] = "amdgcn-amd-amdhsa";
   argv[n++] = "-mcpu=gfx803";
   argv[n++] = "-O2";
+  argv[n++] = "-cl-kernel-arg-info"; /* argument names in the metadata, for messages and bindings */
   argv[n++] = devlib;
   for (char *s = opts ? strtok(opts, " \t\n") : NULL; s && n < 150; s = strtok(NULL, " \t\n")) argv[n++] = s;
   argv[n++] = "-c";

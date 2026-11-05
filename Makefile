@@ -88,7 +88,8 @@ atom-names:
 # relocatable object directly.
 AMDGPU_CLANG ?= /opt/homebrew/opt/llvm/bin/clang
 DEVICE_LIBS := local/device-libs
-AMDGPU_CFLAGS := -x cl -cl-std=CL1.2 -target amdgcn-amd-amdhsa -mcpu=gfx803 -O2 --rocm-device-lib-path=$(DEVICE_LIBS)
+AMDGPU_CFLAGS := -x cl -cl-std=CL1.2 -target amdgcn-amd-amdhsa -mcpu=gfx803 -O2 -cl-kernel-arg-info \
+                 --rocm-device-lib-path=$(DEVICE_LIBS)
 KERNELS := $(patsubst kernels/%.cl,build/kernels/%.o,$(wildcard kernels/*.cl))
 
 kernels: $(KERNELS)

@@ -154,11 +154,25 @@ Next:
     the enable messages follow.
   - Thermal and fan control come first. Voltages come only from the VBIOS
     tables, through the same code amdgpu uses.
-- **Kernel features:** scratch (`COMPUTE_TMPRING_SIZE` and a
-  private-segment buffer), and linked code objects (`ld.lld`), so arbitrary
-  OpenCL kernels run.
-- **A library:** the host API as a C library with a header outside the
-  backend, so a workload is its own program.
+- **Kernel features ✅.** Ordinary OpenCL C runs, with AMD's device
+  libraries linked in at compile time.
+  - The loader relocates whole code objects and reads their metadata.
+  - Dispatch provides scratch, the AQL packet, the hidden arguments and
+    dynamic `__local` memory.
+  - `rawgpu kernel-test` checks it all on the card. It covers atomics, and
+    29 ocml functions, every one within its OpenCL 1.2 ulp limit.
+  - Atomics needed VMID 0 at MTYPE NC instead of amdgpu's UC. That also
+    turned on L2 caching for every kernel.
+- **A library ✅** (`include/rawgpu.h`, docs/LIBRARY.md).
+  - It provides `librawgpu.a`/`.dylib` and a Python binding with numpy.
+  - Bring-up runs automatically when the card needs it.
+  - OpenCL C is compiled at runtime and cached.
+  - Launches are asynchronous.
+  - Register-blocked SGEMM: 4.8 TFLOPS at 4096 (68% of peak), exact
+    against the CPU.
+- **Not yet:** printf, images, OpenCL 2.0 generic-to-local/private casts
+  (they need the queue pointer on gfx8), a dynamic stack, several queues,
+  and GPU timestamps.
 
 Pick a narrow workload that fits 8 GB and Polaris's FP32 strength (6–7 TFLOPS,
 256 GB/s, no fast FP16), and that can run as a background job from the Mac:

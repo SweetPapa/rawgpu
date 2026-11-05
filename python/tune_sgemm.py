@@ -7,6 +7,8 @@ import time
 
 import numpy as np
 
+np.seterr(all="ignore")  # numpy 2's Accelerate matmul raises spurious divide/overflow warnings on Apple Silicon
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rawgpu  # noqa: E402
 

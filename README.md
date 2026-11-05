@@ -9,10 +9,10 @@ Apple-signed DriverKit extension that hands raw PCIe access (config space, BAR
 MMIO, DMA buffers) to userspace. On top of that, rawgpu is a small C codebase
 that identifies the card and, family by family, brings it up.
 
-**Status:** stages 1–4 of 5 done, and stage 5 has its clocks. The card runs
-compiled compute kernels at its rated clocks under amdgpu's own power
-management. Next: kernel features and a library for real workloads. The
-first card is a PowerColor RX 590 (Polaris 30).
+**Status:** the card runs ordinary OpenCL C kernels at its rated clocks,
+under amdgpu's own power management, from a C library or from Python
+(`include/rawgpu.h`, [docs/LIBRARY.md](docs/LIBRARY.md)). Next: real
+workloads. The first card is a PowerColor RX 590 (Polaris 30).
 
 - **Posting works.** rawgpu posts the card from userspace: Linux amdgpu's own
   ATOM interpreter, unmodified, runs the VBIOS `ASIC_Init`. That brings up the
@@ -37,8 +37,24 @@ first card is a PowerColor RX 590 (Polaris 30).
   inside rawgpu (`src/pp/`).
   - The SMC manages clocks, voltages, fan and power limits.
   - Measured on the GPU: engine 1540 MHz, memory 2000 MHz.
-  - FP32 multiply-add: 6.97 TFLOPS. VRAM copy: 172 GB/s. About 5x the
+  - FP32 multiply-add: 6.97 TFLOPS. VRAM copy: 186 GB/s. About 5x the
     boot clocks.
+- **A library for programs** (`librawgpu`, C and Python).
+  - OpenCL C kernels are compiled at runtime by clang with AMD's device
+    libraries, so every OpenCL built-in is available and the math comes from
+    ocml.
+  - Also in it: scratch, `__local` memory, atomics, constants, async
+    launches.
+  - SGEMM reaches 4.8 TFLOPS (68% of peak).
+
+```python
+import numpy as np, rawgpu
+gpu = rawgpu.Device()                          # brings the card up if it needs it
+x = gpu.array(np.arange(1 << 20, dtype=np.float32))
+gpu.program("__kernel void sq(__global float *x) { size_t i = get_global_id(0); x[i] *= x[i]; }").sq(x, global_size=x.size)
+a = np.random.rand(2048, 2048).astype(np.float32)
+print(x.numpy()[:4], gpu.matmul(gpu.array(a), gpu.array(a)).numpy()[0, :4])
+```
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) and [docs/LOG.md](docs/LOG.md).
 
@@ -54,9 +70,11 @@ make
 ./build/rawgpu mc-load        # the driver's MC firmware, as amdgpu loads it
 ./build/rawgpu dpm-enable     # SMC firmware + microcode + power management (or `smc-load` for boot clocks)
 ./build/rawgpu sdma-test      # DMA host <-> VRAM, with bandwidth
-make kernels                  # needs Homebrew llvm (brew install llvm)
+make kernels                  # needs Homebrew llvm (brew install llvm); fetches AMD's device libraries once
 ./build/rawgpu compute-test   # compute queue, PM4 writes, then the vadd kernel
+./build/rawgpu kernel-test    # the kernel ABI: work-items, scratch, atomics, LDS, math accuracy
 ./build/rawgpu bench-compute  # host API: bandwidth, FLOPS, SGEMM, all checked on the CPU
+python3 python/test_rawgpu.py # the library end to end, from Python
 ```
 
 **Keep the Mac awake while the card holds state.** Sleep resets the card (the
@@ -88,7 +106,9 @@ Driver Extensions → TinyGPU. Check that it bound with
 | `rawgpu smc-load [--force]` | Starts the SMC firmware; it loads the SDMA, RLC and CP microcode from VRAM | **Writes**: SMC RAM, 8 MB of reserved VRAM. Lasts until the card loses power |
 | `rawgpu sdma-test [MB] ...` | GART + SDMA bring-up, copy and fill tests with timing (MB ≤ 127) | **Writes**: VM setup, VRAM, host buffers. Needs `smc-load` first |
 | `rawgpu compute-test [--kernel F]` | RLC/MEC bring-up, one compute queue, PM4 writes and fences, then `vadd` on 1M floats | **Writes**: GFX setup, VRAM, host buffers. Needs `smc-load` first |
-| `rawgpu bench-compute [--sgemm N]` | Engine clock (measured on the GPU), copy bandwidth, FP32 MAD/FMA rate, LDS SGEMM | **Writes**: GFX/SDMA setup, VRAM, host buffers. Needs `smc-load` first |
+| `rawgpu bench-compute [--sgemm N]` | Engine clock (measured on the GPU), copy bandwidth, FP32 MAD/FMA rate, SGEMM | **Writes**: GFX/SDMA setup, VRAM, host buffers. Needs the card up |
+| `rawgpu kernel-test [--skip NAME]` | The kernel ABI and ocml accuracy, checked against the CPU (`kernels/abi_test.cl`) | **Writes**: GFX/SDMA setup, VRAM. Needs the card up |
+| `rawgpu kernel-info FILE` | A code object's kernels, resources and arguments | None (no GPU needed) |
 | `rawgpu soft-reset` | amdgpu's SDMA/MC soft reset for blocks that report busy | **Writes**; see the recovery notes in the roadmap |
 | `rawgpu reset`, `rawgpu asic-reset` | PCIe reset / amdgpu's PCI-config reset | **Writes**; neither had any effect on this card |
 

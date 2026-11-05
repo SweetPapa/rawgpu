@@ -63,7 +63,7 @@ void rawgpu_close(rawgpu *g);
 const char *rawgpu_error(const rawgpu *g);
 
 typedef struct {
-  char name[64];             /* e.g. "AMD Polaris 10 (POLARIS10), 1002:67df rev e1" */
+  char name[64];             /* e.g. "AMD POLARIS10, PCI 1002:67df rev e1, board 148c:2391" */
   char arch[16];             /* "gfx803" */
   unsigned compute_units;
   unsigned wavefront_size;   /* 64 */

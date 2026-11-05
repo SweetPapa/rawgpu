@@ -158,6 +158,37 @@ The loader rejects a kernel that needs any of these, with a message.
 - Two waves per SIMD need at most 128 VGPRs; `rawgpu kernel-info` shows a
   kernel's count.
 
+## Measured (RX 590, DPM on, 2026-11-04)
+
+| | |
+|---|---|
+| engine clock under load (`s_memtime`) | 1540 MHz |
+| FP32 multiply-add (`v_mad_f32`) | 6961 GFLOPS (98% of 36 CUs x 128 x 1.545 GHz) |
+| VRAM copy, a kernel | 186 GB/s (read + write) |
+| host <-> VRAM, SDMA | 2.8-3.1 GB/s (the Thunderbolt link) |
+| SGEMM 1024 / 2048 / 4096, `rawgpu_sgemm()` | 2.99 / 3.91 / 4.84 TFLOPS |
+| launch to fence seen, empty work | about 100 us |
+| first compile of a small kernel / cached | 70-270 ms / under 1 ms |
+
+The SGEMM kernel (`kernels/sgemm.cl`) computes 8x8 outputs per work-item
+in 128x128 tiles. It uses 124 VGPRs, so two waves fit per SIMD, and its
+`KUNROLL=2` won the sweep in `python/tune_sgemm.py`. Unrolling all 8 k
+steps needs 218 VGPRs and drops to 3.3 TFLOPS. Small matrices are limited
+by parallelism: a 1024-square product has only 64 tiles for 36 compute
+units.
+
+ocml accuracy, from `rawgpu kernel-test`: the worst error in ULPs over
+65536 inputs per function, against the CPU in double precision. Every
+function is within its OpenCL 1.2 limit.
+
+| function | ulp | function | ulp | function | ulp |
+|---|---|---|---|---|---|
+| sin / cos / tan | 1.46 / 1.50 / 1.87 | exp / exp2 / exp10 | 0.84 / 0.76 / 0.82 | sqrt / rsqrt / cbrt | 0.88 / 0.82 / 1.02 |
+| asin / acos / atan | 2.46 / 1.39 / 1.73 | log / log2 / log10 | 1.83 / 1.00 / 1.70 | pow | 1.23 |
+| atan2 | 2.30 | expm1 / log1p | 1.10 / 0.53 | erf / erfc | 1.32 / 2.51 |
+| sinh / cosh / tanh | 0.80 / 0.55 / 1.31 | hypot / fmod | 1.36 / 0 | tgamma / lgamma | 9.07 / 3.70 |
+| divide | 1.75 | | | | |
+
 ## Environment
 
 | variable | default | what |

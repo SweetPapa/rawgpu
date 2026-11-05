@@ -2,6 +2,36 @@
 
 Dated, factual notes from real hardware. Newest first.
 
+## 2026-11-04: the library, on a power-cycled card
+
+- **`build/examples/saxpy` brought the cold card up through the library**
+  (`RAWGPU_OPEN_BRINGUP`: post, mc-load, dpm-enable with AVFS). It then
+  compiled its OpenCL source at runtime and got 1M results right.
+- **`rawgpu kernel-test`: every check passed.** That covers work-items in
+  3-D, the AQL packet, relocated constants, dynamic LDS, vectors and
+  conversions, double precision, and 29 ocml functions within their
+  OpenCL 1.2 limits.
+  - **Scratch:** 1 KB per work-item ran at 1152 waves in 73 MB. 8 KB per
+    work-item got 508 waves in 254 MB, and the SPI throttled to that, with
+    no corruption.
+  - **Atomics:** global add, max, xor and min, plus LDS atomics, all right
+    under MTYPE NC. That confirms the UC diagnosis.
+- **MTYPE NC also turned on L2 caching for every kernel.** The old 16x16
+  SGEMM went from 435 to 800 GFLOPS with no change to its code, and VRAM
+  copy from 172 to 186 GB/s.
+- **The register-blocked SGEMM (`sgemm_nn`)** is exact against the CPU at
+  every size. It ran at 2987 GFLOPS at 1024, 3911 at 2048 and 4838 at
+  4096: 68% of peak. In the `KUNROLL` sweep at 4096, unroll 1/2/4 gave
+  4582/4835/4653, and a full unroll at one wave per SIMD gave 3300.
+- **`python/test_rawgpu.py` passed:**
+  - runtime compile, 73-270 ms, then cached;
+  - saxpy and a `__local` reduction;
+  - GELU through ocml `erf`, within 2.7e-7;
+  - host buffers;
+  - compiler errors and argument errors as exceptions;
+  - all 28 exact SGEMM cases (4 transposes x 7 shapes, alpha and beta);
+  - a random 1000x700x900 matmul to 1.3e-6.
+
 ## 2026-11-04: kernel ABI for ordinary OpenCL C
 
 Work toward a library: kernels that use OpenCL's built-ins, scratch and
