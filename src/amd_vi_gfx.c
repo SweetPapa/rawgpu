@@ -293,7 +293,10 @@ static int hqd_dequeue(vi_dev *v) {
   vi_wreg(v, mmCP_HQD_DEQUEUE_REQUEST, DEQUEUE_DRAIN_PIPE);
   int r = vi_wait(v, mmCP_HQD_ACTIVE, CP_HQD_ACTIVE__ACTIVE_MASK, 0, 1000000);
   if (r == -ETIMEDOUT) fprintf(stderr, "rawgpu: compute queue did not go inactive after a drain request\n");
-  return r;
+  vi_wreg(v, mmCP_HQD_DEQUEUE_REQUEST, 0); /* gfx_v8_0_deactivate_hqd() */
+  vi_wreg(v, mmCP_HQD_PQ_RPTR, 0);
+  vi_wreg(v, mmCP_HQD_PQ_WPTR, 0);
+  return r ? r : v->err;
 }
 
 /* gfx_v8_0_mqd_init(), for a queue the host activates itself (as the KIQ) */
@@ -399,13 +402,20 @@ int vi_cq_start(vi_cq *q, vi_dev *v, vi_mem ring, uint32_t ring_bytes, vi_mem wb
   q->shadow = ring.cpu ? ring.cpu : calloc(1, ring_bytes);
   if (!q->shadow) return -ENOMEM;
   memset(q->shadow, 0, ring_bytes);
+  /* A queue left active by a process that exited without closing it goes first: draining it rewrites its
+   * last fence, and its writeback has the same GPU address as this queue's (the same GART slot, now this
+   * process's page). Cleared before the drain, the fence slot would read that old sequence number, and
+   * this queue's first waits would return before their work had run. */
+  vi_srbm_select(v, q->me, q->pipe, q->queue, 0);
+  int r = hqd_dequeue(v);
+  vi_srbm_select(v, 0, 0, 0, 0);
   static const uint8_t zero[GFX8_MEC_HPD_SIZE];
   if (!ring.cpu) vi_mem_write(v, &ring, 0, q->shadow, ring_bytes);
   vi_mem_write(v, &wb, 0, zero, 64);
   vi_mem_write(v, &eop, 0, zero, GFX8_MEC_HPD_SIZE);
+  vi_hdp_flush(v);
 
   vi_srbm_select(v, q->me, q->pipe, q->queue, 0);
-  int r = hqd_dequeue(v); /* left active by an earlier run */
   struct vi_mqd_allocation *a = calloc(1, sizeof *a);
   if (!a) r = -ENOMEM;
   if (!r) {

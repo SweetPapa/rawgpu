@@ -15,14 +15,16 @@ launches are asynchronous and in order, transfers wait for them, errors raise
 rawgpu.Error with the library's message. Set RAWGPU_LIB to use a specific
 librawgpu.dylib; by default the one in this checkout's build/ directory.
 """
+import atexit
 import ctypes
 import ctypes.util
 import os
 import struct
+import weakref
 
 import numpy as np
 
-__all__ = ["Device", "Buffer", "Program", "Kernel", "Local", "Error"]
+__all__ = ["Device", "Buffer", "BufferView", "Program", "Kernel", "Local", "Error"]
 
 MEM_VRAM, MEM_HOST = 0, 1
 OPEN_BRINGUP = 1
@@ -68,6 +70,18 @@ class _KernelInfo(ctypes.Structure):
 
 
 _lib = None
+_open_devices = weakref.WeakSet()
+
+
+@atexit.register
+def _close_open_devices():
+    # Interpreter shutdown does not reliably run __del__ (it does not once torch is loaded, for one), and a
+    # device left open leaves its compute queue active on the card for the next process to retire.
+    for dev in list(_open_devices):
+        try:
+            dev.close()
+        except Exception:
+            pass
 
 
 def _L():
@@ -102,6 +116,13 @@ def _L():
     return L
 
 
+class BufferView:
+    """A buffer argument starting `offset` bytes in: Buffer.at(offset)."""
+
+    def __init__(self, buf, offset):
+        self.buf, self.offset = buf, int(offset)
+
+
 class Local:
     """A __local pointer argument: `nbytes` of LDS per work-group."""
 
@@ -119,6 +140,7 @@ class Device:
         if r:
             raise Error(L.rawgpu_error(None).decode(errors="replace"))
         self._h = h
+        _open_devices.add(self)
 
     def _err(self):
         return Error(_L().rawgpu_error(self._h).decode(errors="replace"))
@@ -240,6 +262,10 @@ class Buffer:
         if _L().rawgpu_write(self.dev._h, self._h, 0, a.ctypes.data, a.nbytes):
             raise self.dev._err()
 
+    def at(self, offset):
+        """This buffer, `offset` bytes in, as a kernel argument."""
+        return BufferView(self, offset)
+
     def host_view(self):
         """A numpy array that *is* this host buffer's memory (no copy). The GPU writes it
         directly: read it only after the launches that write it are done."""
@@ -305,6 +331,8 @@ class Kernel:
         if kind == ARG_BUFFER:
             if isinstance(value, Buffer):
                 r = _L().rawgpu_set_arg_buf_offset(self._h, i, value._h, 0)
+            elif isinstance(value, BufferView):
+                r = _L().rawgpu_set_arg_buf_offset(self._h, i, value.buf._h, value.offset)
             elif value is None:
                 r = _L().rawgpu_set_arg_buf_offset(self._h, i, None, 0)
             else:
