@@ -276,6 +276,18 @@ void vi_smu_report(vi_dev *v) {
   printf("temperature            %d C\n", vi_temp_c(v));
 }
 
+/* The same readings as vi_smu_report(), as JSON members (no braces) for `rawgpu status --json`. */
+void vi_smu_json(vi_dev *v) {
+  bool up = smc_firmware_up(v);
+  uint32_t fs = up ? vi_rsmc(v, ixFEATURE_STATUS) : 0, sclk = 0, mclk = 0;
+  bool clocks = up && !vi_smu_clocks(v, &sclk, &mclk);
+  printf("\"smc_firmware\":%s,\"engine_dpm\":%s,\"memory_dpm\":%s,\"engine_mhz\":%d,\"memory_mhz\":%d,"
+         "\"temperature_c\":%d,\"fan_percent\":%d",
+         up ? "true" : "false", REG_GET_FIELD(fs, FEATURE_STATUS, SCLK_DPM_ON) ? "true" : "false",
+         REG_GET_FIELD(fs, FEATURE_STATUS, MCLK_DPM_ON) ? "true" : "false", clocks ? (int)sclk : -1,
+         clocks ? (int)mclk : -1, vi_temp_c(v), vi_fan_percent(v));
+}
+
 /* ---- starting the SMC firmware ---- */
 
 /* smu7_upload_smc_firmware_data(): the image goes to SMC 0x20000 through the

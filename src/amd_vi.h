@@ -109,6 +109,7 @@ int vi_temp_c(vi_dev *v);                             /* GPU temperature in degr
 int vi_fan_percent(vi_dev *v);                        /* fan PWM duty, 0-100; -1 if not under SMC control */
 int vi_smu_clocks(vi_dev *v, uint32_t *sclk_mhz, uint32_t *mclk_mhz); /* as the SMC reports them */
 void vi_smu_report(vi_dev *v);
+void vi_smu_json(vi_dev *v);                          /* the same, as JSON members, for status --json */
 const char *vi_smc_fw_name(const rg_dev *d, bool hard_key); /* the image amdgpu would load */
 bool vi_smc_is_kicker(const rg_dev *d);
 struct rg_atom;

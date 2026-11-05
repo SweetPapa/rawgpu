@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The app's own window: its commands and events",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

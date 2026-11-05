@@ -1,5 +1,6 @@
 /* rawgpu CLI. Every command is read-only unless noted. */
 #include "amd_kernel.h"
+#include "rawgpu.h"
 #include "rg.h"
 
 #include <errno.h>
@@ -10,7 +11,6 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/sysctl.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -24,6 +24,8 @@ static const char *usage =
   "  bench [N]        round-trip latency of config and register reads\n"
   "  dma-test [KB]    allocate a DMA buffer and print its bus addresses (no GPU activity)\n"
   "  reset            WRITES: PCIe reset through TinyGPU (FLR, else hot reset); a no-op on the RX 590\n"
+  "  up               WRITES: bring the card up if it needs it (post, mc-load, dpm-enable), as the library does\n"
+  "  who [--json]     the TinyGPU server and the program using the card (never connects, never starts a server)\n"
   "  eject [--timeout SECONDS]\n"
   "                   wait for the program using the card to finish, stop the card's engines, close it,\n"
   "                   and stop the TinyGPU server; then says it is safe to unplug\n"
@@ -151,70 +153,10 @@ static int cmd_dma_test(rg_dev *d, size_t kb) {
 
 /* ---- rawgpu eject ---- */
 
-#define TINYGPU_EXE "/TinyGPU.app/Contents/MacOS/TinyGPU"
-
-static bool is_tinygpu_process(int pid) {
-  char path[PROC_PIDPATHINFO_MAXSIZE];
-  if (pid <= 0 || proc_pidpath(pid, path, sizeof path) <= 0) return false;
-  size_t n = strlen(path), m = strlen(TINYGPU_EXE);
-  return n >= m && !strcmp(path + n - m, TINYGPU_EXE);
-}
-
-/* a and b name the same path, ignoring repeated slashes ($TMPDIR ends in one) */
-static bool same_path(const char *a, const char *b) {
-  for (;;) {
-    while (a[0] == '/' && a[1] == '/') a++;
-    while (b[0] == '/' && b[1] == '/') b++;
-    if (*a != *b) return false;
-    if (!*a) return true;
-    a++, b++;
-  }
-}
-
-/* Is pid `TinyGPU server <sock>`? Reads its arguments (KERN_PROCARGS2: argc, the executable path, then
- * the argument strings). */
-static bool serves_socket(int pid, const char *sock) {
-  if (!is_tinygpu_process(pid)) return false;
-  int mib[3] = {CTL_KERN, KERN_PROCARGS2, pid};
-  char buf[16384];
-  size_t size = sizeof buf;
-  if (sysctl(mib, 3, buf, &size, NULL, 0) || size < sizeof(int)) return false;
-  int argc;
-  memcpy(&argc, buf, sizeof argc);
-  char *p = buf + sizeof argc, *end = buf + size;
-  p += strnlen(p, (size_t)(end - p)); /* the executable path, then padding */
-  while (p < end && !*p) p++;
-  const char *argv[3] = {0};
-  for (int i = 0; i < argc && i < 3 && p < end; i++) {
-    argv[i] = p;
-    p += strnlen(p, (size_t)(end - p)) + 1;
-  }
-  return argc >= 3 && argv[1] && !strcmp(argv[1], "server") && argv[2] && same_path(argv[2], sock);
-}
-
-/* Processes running TinyGPU.app's executable: the server for `sock` (if any) in *server, the count of
- * others (a server some other program started, e.g. tinygrad's) returned, the first of them in *other. */
-static int tinygpu_processes(const char *sock, int *server, int *other) {
-  *server = *other = 0;
-  int n = proc_listallpids(NULL, 0);
-  if (n <= 0) return 0;
-  size_t cap = (size_t)n + 64;
-  pid_t *all = calloc(cap, sizeof *all);
-  if (!all) return 0;
-  n = proc_listallpids(all, (int)(cap * sizeof *all));
-  int others = 0;
-  for (int i = 0; i < n; i++) {
-    if (all[i] == getpid() || !is_tinygpu_process(all[i])) continue;
-    if (!*server && serves_socket(all[i], sock)) *server = all[i];
-    else if (!others++) *other = all[i];
-  }
-  free(all);
-  return others;
-}
-
 /* How many clients the server is connected to: its AF_UNIX sockets other than the listening one. A
- * look at its file descriptors, so it neither queues behind the client nor disturbs it. -1 if unknown. */
-static int server_clients(int pid) {
+ * look at its file descriptors, so it neither queues behind the client nor disturbs it. -1 if unknown.
+ * With peers, also the kernel's handles for the other ends of up to max of those connections. */
+static int server_connections(int pid, uint64_t *peers, int max) {
   int bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, NULL, 0);
   if (bytes <= 0) return -1;
   struct proc_fdinfo *fds = malloc((size_t)bytes);
@@ -225,10 +167,77 @@ static int server_clients(int pid) {
     if (fds[i].proc_fdtype != PROX_FDTYPE_SOCKET) continue;
     struct socket_fdinfo si;
     if (proc_pidfdinfo(pid, fds[i].proc_fd, PROC_PIDFDSOCKETINFO, &si, sizeof si) != sizeof si) continue;
-    if (si.psi.soi_family == AF_UNIX && !(si.psi.soi_options & SO_ACCEPTCONN)) clients++;
+    if (si.psi.soi_family != AF_UNIX || (si.psi.soi_options & SO_ACCEPTCONN)) continue;
+    if (peers && clients < max) peers[clients] = si.psi.soi_proto.pri_un.unsi_conn_pcb;
+    clients++;
   }
   free(fds);
   return bytes > 0 ? clients : -1;
+}
+
+static int server_clients(int pid) { return server_connections(pid, NULL, 0); }
+
+/* The processes at the other end of the server's connections: whose socket's control block is the one
+ * the server's socket is connected to (lsof matches them the same way). Only this user's processes can
+ * be inspected, which covers anything that could have opened the card. */
+static int server_peers(int server, int *pids, int max) {
+  uint64_t pcb[16];
+  int npcb = server_connections(server, pcb, 16), found = 0;
+  if (npcb > 16) npcb = 16;
+  if (npcb <= 0) return 0;
+  int n = proc_listallpids(NULL, 0);
+  if (n <= 0) return 0;
+  size_t cap = (size_t)n + 64;
+  pid_t *all = calloc(cap, sizeof *all);
+  if (!all) return 0;
+  n = proc_listallpids(all, (int)(cap * sizeof *all));
+  for (int i = 0; i < n && found < max; i++) {
+    if (all[i] == server || all[i] == getpid()) continue;
+    int bytes = proc_pidinfo(all[i], PROC_PIDLISTFDS, 0, NULL, 0);
+    if (bytes <= 0) continue;
+    struct proc_fdinfo *fds = malloc((size_t)bytes);
+    if (!fds) continue;
+    bytes = proc_pidinfo(all[i], PROC_PIDLISTFDS, 0, fds, bytes);
+    bool hit = false;
+    for (int j = 0; bytes > 0 && j < bytes / (int)sizeof *fds && !hit; j++) {
+      if (fds[j].proc_fdtype != PROX_FDTYPE_SOCKET) continue;
+      struct socket_fdinfo si;
+      if (proc_pidfdinfo(all[i], fds[j].proc_fd, PROC_PIDFDSOCKETINFO, &si, sizeof si) != sizeof si) continue;
+      if (si.psi.soi_family != AF_UNIX) continue;
+      for (int k = 0; k < npcb && !hit; k++) hit = si.psi.soi_pcb == pcb[k];
+    }
+    free(fds);
+    if (hit) pids[found++] = all[i];
+  }
+  free(all);
+  return found;
+}
+
+/* pid's command line, its arguments joined by spaces (the executable's name if they are unreadable) */
+static void proc_cmdline(int pid, char *out, size_t n) {
+  char *buf;
+  const char *argv[64];
+  int argc = rg_proc_args(pid, &buf, argv, 64);
+  out[0] = 0;
+  if (argc > 0) {
+    size_t len = 0;
+    for (int i = 0; i < argc && len + 1 < n; i++)
+      len += (size_t)snprintf(out + len, n - len, "%s%s", i ? " " : "", argv[i]);
+  } else if (proc_name(pid, out, (uint32_t)n) <= 0) {
+    snprintf(out, n, "?");
+  }
+  free(buf);
+}
+
+static void json_str(const char *s) {
+  putchar('"');
+  for (; *s; s++) {
+    unsigned char c = (unsigned char)*s;
+    if (c == '"' || c == '\\') printf("\\%c", c);
+    else if (c < 0x20) printf("\\u%04x", c);
+    else putchar(c);
+  }
+  putchar('"');
 }
 
 static bool process_gone(int pid, double seconds) {
@@ -262,8 +271,13 @@ static int cmd_eject(const char *sock, int argc, char **argv) {
   int pid, other, nothers, r;
   double t0 = now_us(), next_note = 60;
   bool waiting = false;
+  sigset_t stop, unblocked;
+  sigemptyset(&stop);
+  sigaddset(&stop, SIGINT);
+  sigaddset(&stop, SIGTERM);
+  sigaddset(&stop, SIGHUP);
   for (;;) {
-    nothers = tinygpu_processes(path, &pid, &other);
+    nothers = rg_tinygpu_processes(path, &pid, &other);
     if (!pid) {
       struct stat st;
       if (!lstat(path, &st) && S_ISSOCK(st.st_mode)) unlink(path); /* stale: nothing serves it */
@@ -274,8 +288,12 @@ static int cmd_eject(const char *sock, int argc, char **argv) {
     }
     int clients = server_clients(pid);
     if (clients == 0) {
+      /* From here a stop request must not cut the conversation short: the server would later answer
+       * a closed socket and die of SIGPIPE, mid-cleanup. So Ctrl-C and SIGTERM wait until the end. */
+      sigprocmask(SIG_BLOCK, &stop, &unblocked);
       r = rg_attach_tinygpu(&d, path, NULL); /* if another client got in first, this waits for it */
       if (r != -ECONNREFUSED) break;
+      sigprocmask(SIG_SETMASK, &unblocked, NULL);
     }
     double waited = (now_us() - t0) / 1e6;
     if (!waiting) {
@@ -323,8 +341,62 @@ static int cmd_eject(const char *sock, int argc, char **argv) {
   struct stat st;
   if (!lstat(path, &st) && S_ISSOCK(st.st_mode)) unlink(path); /* it does not remove its socket on a signal */
   printf("TinyGPU server: stopped\n");
+  sigset_t pending;
+  if (!sigpending(&pending) && (sigismember(&pending, SIGINT) || sigismember(&pending, SIGTERM) || sigismember(&pending, SIGHUP)))
+    printf("(A stop request came while the card was being closed, so the eject finished first.)\n");
   if (nothers) return not_safe_others(nothers, other);
   printf("\nSafe to unplug. The next rawgpu command starts a new server.\n");
+  return 0;
+}
+
+/* `rawgpu who`: is a server running, and which program has the card? Only looks at processes, so it
+ * can run at any time: it never queues behind a client and never starts a server. */
+static int cmd_who(const char *sock, int argc, char **argv) {
+  bool json = argc == 1 && !strcmp(argv[0], "--json");
+  if (argc && !json) { fprintf(stderr, "usage: rawgpu who [--json]\n"); return -EINVAL; }
+  char buf[1024];
+  const char *path = rg_tinygpu_sock_path(sock, buf, sizeof buf);
+  int pid, other, nothers = rg_tinygpu_processes(path, &pid, &other);
+  int clients = pid ? server_clients(pid) : 0, peers[8], npeers = clients > 0 ? server_peers(pid, peers, 8) : 0;
+  char cmdline[4096];
+  if (json) {
+    printf("{\"socket\":");
+    json_str(path);
+    printf(",\"server_pid\":%d,\"client_count\":%d,\"clients\":[", pid, clients);
+    for (int i = 0; i < npeers; i++) {
+      proc_cmdline(peers[i], cmdline, sizeof cmdline);
+      printf("%s{\"pid\":%d,\"command\":", i ? "," : "", peers[i]);
+      json_str(cmdline);
+      printf("}");
+    }
+    printf("],\"other_tinygpu\":%d}\n", nothers);
+    return 0;
+  }
+  if (!pid) printf("No TinyGPU server is running for rawgpu (%s), so nothing has the card through it.\n", path);
+  else if (clients == 0) printf("TinyGPU server %d is running, and nothing has the card.\n", pid);
+  else {
+    printf("TinyGPU server %d is running. The card is in use by:\n", pid);
+    for (int i = 0; i < npeers; i++) {
+      proc_cmdline(peers[i], cmdline, sizeof cmdline);
+      printf("  pid %d: %s\n", peers[i], cmdline);
+    }
+    if (npeers < clients) printf("  %d connection%s whose process could not be found\n", clients - npeers, clients - npeers > 1 ? "s" : "");
+  }
+  if (nothers) printf("%d other TinyGPU process%s running (pid %d), e.g. another program's server.\n", nothers,
+                      nothers > 1 ? "es are" : " is", other);
+  return 0;
+}
+
+/* `rawgpu up`: what rawgpu_open(RAWGPU_OPEN_BRINGUP) does. A card that is already up is left alone. */
+static int cmd_up(const char *sock) {
+  rawgpu *g;
+  if (rawgpu_open(&g, sock, RAWGPU_OPEN_BRINGUP)) { fprintf(stderr, "rawgpu: %s\n", rawgpu_error(NULL)); return -EIO; }
+  rawgpu_info info;
+  if (!rawgpu_get_info(g, &info))
+    printf("The card is up: %s; engine %d MHz, memory %d MHz, %d C, fan %d%%, %llu of %llu MB VRAM free.\n", info.name,
+           info.engine_mhz, info.memory_mhz, info.temperature_c, info.fan_percent,
+           (unsigned long long)(info.vram_free_bytes >> 20), (unsigned long long)(info.vram_bytes >> 20));
+  rawgpu_close(g);
   return 0;
 }
 
@@ -345,6 +417,8 @@ int main(int argc, char **argv) {
   }
 
   if (!strcmp(cmd, "eject")) return cmd_eject(sock, argc - i, argv + i) ? 1 : 0; /* must not start a server */
+  if (!strcmp(cmd, "who")) return cmd_who(sock, argc - i, argv + i) ? 1 : 0;     /* nor this */
+  if (!strcmp(cmd, "up")) return cmd_up(sock) ? 1 : 0;
 
   rg_dev d;
   int r = rg_open_tinygpu(&d, sock);

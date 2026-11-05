@@ -1,0 +1,33 @@
+:root {
+  --bg: #f6f6f4; --panel: #ffffff; --text: #1d1f23; --muted: #6a6f78; --line: #e3e3df;
+  --accent: #d9534f; --accent-text: #ffffff; --idle: #2e9d5b; --busy: #d18a1f; --off: #9aa0a8; --warn: #d9534f;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #1b1d21; --panel: #24272c; --text: #e6e7ea; --muted: #9aa0a8; --line: #33373e; }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+header { position: sticky; top: 0; background: var(--bg); padding: 16px 18px 12px; border-bottom: 1px solid var(--line); z-index: 1; }
+.head { display: flex; gap: 12px; align-items: flex-start; }
+h1 { font-size: 16px; margin: 0 0 2px; font-weight: 600; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; font-weight: 600; display: flex; gap: 8px; align-items: center; }
+p { margin: 0; }
+.muted { color: var(--muted); }
+.small { font-size: 11px; text-transform: none; letter-spacing: 0; font-weight: 400; }
+.dot { width: 12px; height: 12px; border-radius: 50%; margin-top: 4px; flex: none; background: var(--off); }
+.dot.idle { background: var(--idle); } .dot.busy { background: var(--busy); } .dot.warn { background: var(--warn); }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+button { font: inherit; padding: 5px 11px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--muted); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.small-btn { padding: 1px 8px; font-size: 11px; text-transform: none; letter-spacing: 0; }
+main { padding: 14px 18px 24px; display: grid; gap: 14px; }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+.grid { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; margin: 0; }
+.grid dt { color: var(--muted); }
+.grid dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.log { font: 11.5px/1.45 var(--mono); margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }

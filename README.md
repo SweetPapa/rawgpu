@@ -146,7 +146,7 @@ Driver Extensions → TinyGPU. Check that it bound with
 | `rawgpu atom-info` | Lists the VBIOS command tables and boot clocks | VBIOS read only |
 | `rawgpu post [--trace F] [--trace-ops]` | Runs the VBIOS `ASIC_Init` | **Writes**: clocks, voltages, memory training |
 | `rawgpu vram-test [--enable-fb]` | Pattern test through BAR0 and the indirect window | **Writes** a few KB of VRAM |
-| `rawgpu status` | Engine, VM, SMC and microcode state; temperature | Reads only |
+| `rawgpu status [--json]` | Engine, VM, SMC and microcode state; temperature. `--json`: one line with the state, clocks, temperature and fan, for programs | Reads only |
 | `rawgpu regs PATTERN...` | Reads registers by name, e.g. `'SDMA0_*'` | Reads only; skips data ports unless named exactly |
 | `rawgpu cfg [--clear-errors]` | Config space, plus PCI/PCIe/AER error status | Config reads (clearing writes the status bits) |
 | `rawgpu mc-load` | The driver's MC sequencer firmware, as amdgpu loads it before power management; retrains memory | **Writes**: MC sequencer. Run after `post`, before `smc-load` |
@@ -161,6 +161,8 @@ Driver Extensions → TinyGPU. Check that it bound with
 | `rawgpu kernel-info FILE` | A code object's kernels, resources and arguments | None (no GPU needed) |
 | `rawgpu soft-reset` | amdgpu's SDMA/MC soft reset for blocks that report busy | **Writes**; see the recovery notes in the roadmap |
 | `rawgpu reset`, `rawgpu asic-reset` | PCIe reset / amdgpu's PCI-config reset | **Writes**; neither had any effect on this card |
+| `rawgpu up` | Brings the card up if it needs it (`post`, `mc-load`, `dpm-enable`), as the library does; a card that is up is left alone | **Writes** only when the card is not up |
+| `rawgpu who [--json]` | Whether the TinyGPU server runs, and which program has the card | None: looks at processes only, never connects, never starts a server |
 | `rawgpu eject [--timeout S]` | Waits for the program using the card to finish, stops the compute queue and SDMA, closes the card and stops the TinyGPU server, then says when it's safe to unplug | **Writes**: retires the compute queue and halts SDMA (no-ops on an idle card) |
 
 **Before unplugging the enclosure, run `rawgpu eject`.** It waits while another
@@ -168,7 +170,15 @@ program has the card, without disturbing it: the server takes one client at a
 time, so `eject` checks the server's sockets rather than connecting. Then it
 makes sure nothing on the card still reads or writes host memory, and stops
 the server. Unplugging while the server held a wedged card once left macOS
-stuck until a restart.
+stuck until a restart. Ctrl-C stops the wait; once `eject` is closing the
+card, it finishes first.
+
+**Menu bar app and Code Search.** `make install-apps` builds two small Tauri
+apps into `~/Applications` ([apps/README.md](apps/README.md)):
+- **rawgpu:** a menu bar app that shows the card's state, temperature, fan and
+  who is using it, with Eject and bring-up.
+- **Code Search:** searches the EmbeddingGemma 2 index of your code. It
+  embeds each query on the RX 590, the Mac's GPU or the Mac's CPU.
 
 Nothing touches the VRAM window until the card is posted. `post` refuses to
 re-run on a posted card unless you pass `--force`. If the card stops answering

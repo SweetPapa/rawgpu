@@ -13,12 +13,15 @@
 #include "rg.h"
 
 #include <errno.h>
+#include <libproc.h>
+#include <stdbool.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/sysctl.h>
 #include <sys/un.h>
 #include <fcntl.h>
 #include <time.h>
@@ -252,6 +255,85 @@ static int spawn_server(const char *sock_path) {
   return r;
 }
 
+/* ---- finding the server among the processes (never by connecting: see rg_attach_tinygpu) ---- */
+
+#define TINYGPU_EXE "/TinyGPU.app/Contents/MacOS/TinyGPU" /* any copy of the app */
+
+static bool is_tinygpu_process(int pid) {
+  char path[PROC_PIDPATHINFO_MAXSIZE];
+  if (pid <= 0 || proc_pidpath(pid, path, sizeof path) <= 0) return false;
+  size_t n = strlen(path), m = strlen(TINYGPU_EXE);
+  return n >= m && !strcmp(path + n - m, TINYGPU_EXE);
+}
+
+/* a and b name the same path, ignoring repeated slashes ($TMPDIR ends in one) */
+static bool same_path(const char *a, const char *b) {
+  for (;;) {
+    while (a[0] == '/' && a[1] == '/') a++;
+    while (b[0] == '/' && b[1] == '/') b++;
+    if (*a != *b) return false;
+    if (!*a) return true;
+    a++, b++;
+  }
+}
+
+/* Up to `max` of pid's arguments, from KERN_PROCARGS2 (argc, the executable path, padding, then the
+ * argument strings), as pointers into *buf, which the caller frees. Returns how many, -1 if unreadable. */
+int rg_proc_args(int pid, char **buf, const char **argv, int max) {
+  int argmax = 0, mib[3] = {CTL_KERN, KERN_ARGMAX, 0};
+  size_t size = sizeof argmax;
+  *buf = NULL;
+  if (sysctl(mib, 2, &argmax, &size, NULL, 0) || argmax <= 0) argmax = 1 << 20;
+  char *b = *buf = malloc((size_t)argmax + 1);
+  if (!b) return -1;
+  mib[1] = KERN_PROCARGS2;
+  mib[2] = pid;
+  size = (size_t)argmax;
+  if (sysctl(mib, 3, b, &size, NULL, 0) || size < sizeof(int)) return -1;
+  b[size] = 0;
+  int argc, n = 0;
+  memcpy(&argc, b, sizeof argc);
+  char *p = b + sizeof argc, *end = b + size;
+  p += strnlen(p, (size_t)(end - p)); /* the executable path */
+  while (p < end && !*p) p++;
+  for (; n < argc && n < max && p < end; n++) {
+    argv[n] = p;
+    p += strnlen(p, (size_t)(end - p)) + 1;
+  }
+  return n;
+}
+
+/* Is pid `TinyGPU server <sock>`? */
+static bool serves_socket(int pid, const char *sock) {
+  if (!is_tinygpu_process(pid)) return false;
+  char *buf;
+  const char *argv[3] = {0};
+  int argc = rg_proc_args(pid, &buf, argv, 3);
+  bool yes = argc >= 3 && !strcmp(argv[1], "server") && same_path(argv[2], sock);
+  free(buf);
+  return yes;
+}
+
+/* Processes running TinyGPU.app's executable: the server for `sock` (if any) in *server, the count of
+ * others (a server some other program started, e.g. tinygrad's) returned, the first of them in *other. */
+int rg_tinygpu_processes(const char *sock, int *server, int *other) {
+  *server = *other = 0;
+  int n = proc_listallpids(NULL, 0);
+  if (n <= 0) return 0;
+  size_t cap = (size_t)n + 64;
+  pid_t *all = calloc(cap, sizeof *all);
+  if (!all) return 0;
+  n = proc_listallpids(all, (int)(cap * sizeof *all));
+  int others = 0;
+  for (int i = 0; i < n; i++) {
+    if (all[i] == getpid() || !is_tinygpu_process(all[i])) continue;
+    if (!*server && serves_socket(all[i], sock)) *server = all[i];
+    else if (!others++) *other = all[i];
+  }
+  free(all);
+  return others;
+}
+
 const char *rg_tinygpu_sock_path(const char *sock_path, char *buf, size_t n) {
   if (sock_path) return sock_path;
   const char *env = getenv("RAWGPU_TINYGPU_SOCK");
@@ -286,6 +368,16 @@ int rg_open_tinygpu(rg_dev *d, const char *sock_path) {
   }
 
   int fd = try_connect(sock_path);
+  if (fd < 0 && errno == ECONNREFUSED) {
+    /* Refused while the server runs: its backlog is full (another program has the card and one more
+     * waits). Wait our turn, rather than start a second server for the same card. */
+    int server, other, noted = 0;
+    while (fd < 0 && errno == ECONNREFUSED && (rg_tinygpu_processes(sock_path, &server, &other), server)) {
+      if (!noted++) fprintf(stderr, "rawgpu: the TinyGPU server (pid %d) is busy with other programs; waiting\n", server);
+      nanosleep(&(struct timespec){0, 100 * 1000 * 1000}, NULL);
+      fd = try_connect(sock_path);
+    }
+  }
   if (fd < 0) {
     if (access(TINYGPU_APP, X_OK) != 0) {
       fprintf(stderr, "rawgpu: %s not found. Run tools/install-tinygpu.sh first.\n", TINYGPU_APP);

@@ -2,6 +2,45 @@
 
 Dated, factual notes from real hardware. Newest first.
 
+## 2026-11-05: a menu bar app, Code Search, and a second-server bug
+
+**CLI for programs:**
+- **`rawgpu who [--json]`** names the program using the card from its
+  process: the server's connected socket's peer is the client socket with
+  the same kernel control block, which is how lsof matches them. It takes
+  about 30 ms, and never connects or starts a server.
+- **`rawgpu status --json`** prints one line with the state, clocks,
+  temperature and fan.
+- **`rawgpu up`** is the library's bring-up as a command.
+
+**Bug: a full backlog started a second TinyGPU server.** The server
+accepts one client, with one more connection waiting. A third program's
+connect is refused, and `rg_open_tinygpu` took a refusal to mean no server,
+so it spawned another for the same card. Reproduced with one holder, one
+waiting `status` and a third `status`. Now it checks the processes for a
+server on the socket, and if there is one, it waits its turn. The test
+showed one server throughout, with the third command waiting and then
+succeeding.
+
+**Bug: Ctrl-C could abandon an eject mid-request.** `rawgpu eject` now
+blocks SIGINT, SIGTERM and SIGHUP from the moment it attaches until the
+server is stopped. Before that, a signal still stops it (tested: a SIGTERM
+while it waited for a busy card exited at once, and the holder carried on).
+After it, the eject finishes first and says a stop request came (tested:
+SIGTERM at 50 and 200 ms into an eject of an idle card).
+
+**Apps (`apps/`, Tauri 2):**
+- **rawgpu**, in the menu bar: the card's state, who has it, the indexer's
+  progress while it runs, Eject (cancellable while it waits), and bring-up.
+  It never starts the server and never queues behind a client. Tested
+  through busy, ejecting and ejected, with a program holding the card for
+  22 s. The eject waited 10 s, then finished, and the server stayed down
+  afterwards.
+- **Code Search:** queries on the RX 590, the Mac's GPU or its CPU, through
+  `search_server.py`. The three give the same top 5, to four digits of the
+  score. A warm query on the RX 590 embeds in 49 ms and scores the 435k
+  chunks in 25 ms. The card is released after 20 idle seconds.
+
 ## 2026-11-05: `rawgpu eject`, the fan readout, and ~/code indexed on the card
 
 **`rawgpu eject`** makes unplugging the enclosure safe.

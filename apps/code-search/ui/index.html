@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Code Search</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <form id="form" autocomplete="off">
+      <input id="q" type="search" placeholder="Describe the code you're looking for…" spellcheck="false" autofocus>
+      <button id="go" type="submit" class="primary">Search</button>
+    </form>
+    <div class="controls">
+      <div class="seg" role="radiogroup" aria-label="Embed the query on">
+        <button type="button" data-backend="rawgpu" role="radio">RX 590</button>
+        <button type="button" data-backend="mps" role="radio">Mac GPU</button>
+        <button type="button" data-backend="cpu" role="radio">Mac CPU</button>
+      </div>
+      <label>Project
+        <input id="project" list="projects" placeholder="all" spellcheck="false">
+        <datalist id="projects"></datalist>
+      </label>
+      <label>Results
+        <select id="k"><option>10</option><option selected>20</option><option>50</option></select>
+      </label>
+      <label class="check"><input id="dedupe" type="checkbox" checked> Fold copies</label>
+      <label>Open in <select id="editor"></select></label>
+    </div>
+    <div id="statusbar" class="statusbar">
+      <span id="status">Starting…</span>
+      <span id="card" class="card-state"></span>
+    </div>
+  </header>
+
+  <div id="error" class="error" hidden>
+    <span id="error-text"></span>
+    <span class="error-actions">
+      <button id="use-mac" type="button" hidden>Use the Mac GPU instead</button>
+      <button id="restart" type="button" hidden>Restart the search backend</button>
+      <button id="log" type="button">Log</button>
+    </span>
+  </div>
+
+  <main>
+    <ol id="results" class="results"></ol>
+    <article id="preview" class="preview">
+      <div class="empty" id="empty">
+        <p>Search your code by meaning: “where do we retry failed uploads”, “websocket audio streaming on ESP32”, “terraform for a Cloud Run service”.</p>
+        <p class="muted" id="index-line"></p>
+      </div>
+    </article>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -109,6 +109,12 @@ caffeinate -i $PY $IX run            # resumable; a rerun embeds only what chang
 $PY $IX search "how do we post the card" -k 5 [--project rawgpu]
 ```
 
+For a window, use Code Search (`apps/code-search`, see `apps/README.md`).
+It runs `search_server.py`, which keeps the model loaded and answers JSON
+lines on stdin. Each query is embedded on the RX 590, the Mac's GPU or the
+Mac's CPU: all three give the same vectors. The server holds the card only
+while queries come in, and releases it after 20 idle seconds.
+
 - **Read-only:** it only reads the folder, and writes to `~/rawgpu-index`
   (`--out`), which must be outside it. It makes no network requests.
 - **Your code only:** clones, submodules, vendored folders and known

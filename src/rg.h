@@ -59,6 +59,11 @@ int rg_open_tinygpu(rg_dev *d, const char *sock_path); /* NULL = default path */
 void rg_close(rg_dev *d);
 /* The server's socket path: sock_path, else $RAWGPU_TINYGPU_SOCK, else $TMPDIR/rawgpu-tinygpu.sock. */
 const char *rg_tinygpu_sock_path(const char *sock_path, char *buf, size_t n);
+/* Processes running TinyGPU: the server for sock_path in *server (0 if none); returns how many others
+ * there are (another program's server, say), the first of them in *other. Looks only at processes. */
+int rg_tinygpu_processes(const char *sock_path, int *server, int *other);
+/* Up to max of pid's arguments, pointing into *buf (the caller frees it); how many, or -1. */
+int rg_proc_args(int pid, char **buf, const char **argv, int max);
 /* Connect to a TinyGPU server that is already running, without starting one. If another client has the
  * card, this waits until it leaves. Returns 0 (and the server's pid); -ENOENT if there is no socket;
  * -ECONNREFUSED if connecting was refused (a stale socket, or a busy server's backlog is full); -EIO if

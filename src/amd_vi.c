@@ -217,12 +217,23 @@ static int vi_probe(rg_dev *d, const rg_ident *id) {
 
 /* `rawgpu status`: read-only snapshot of the engines rawgpu brings up. */
 static int cmd_status(rg_dev *d, const rg_ident *id, int argc, char **argv) {
-  (void)id; (void)argc; (void)argv;
+  (void)id;
+  bool json = argc == 1 && !strcmp(argv[0], "--json");
+  if (argc && !json) return -EINVAL;
   vi_dev v;
   int r = vi_open(&v, d);
   if (r) return r;
   uint32_t memsize;
   bool posted = vi_posted(&v, &memsize);
+  if (json) { /* one line, for programs (the tray app): the card's state, clocks and sensors */
+    printf("{\"posted\":%s,\"vram_mb\":%u", posted ? "true" : "false", posted ? memsize : 0);
+    if (posted) {
+      printf(",\"busy\":%s,", vi_rreg(&v, mmGRBM_STATUS) & GRBM_STATUS__GUI_ACTIVE_MASK ? "true" : "false");
+      vi_smu_json(&v);
+    }
+    printf("}\n");
+    return v.err;
+  }
   printf("posted:                %s (CONFIG_MEMSIZE = %u MB)\n", posted ? "yes" : "NO", memsize);
   if (!posted) return v.err;
 
@@ -548,7 +559,7 @@ int vi_cmd_gfx_reset(rg_dev *d, const rg_ident *id, int argc, char **argv);     
 int vi_quiesce(rg_dev *d, const rg_ident *id);                                  /* amd_vi_gfx.c */
 
 static const rg_cmd vi_cmds[] = {
-  {"status", "", "engine, VM and SMC state (read-only)", cmd_status},
+  {"status", "[--json]", "engine, VM and SMC state; --json: one line with the state, clocks and sensors (read-only)", cmd_status},
   {"regs", "PATTERN...", "read registers by name, e.g. 'SDMA0_GFX_*' (read-only)", cmd_regs},
   {"soft-reset", "", "WRITES: amdgpu's soft reset of SDMA and the memory controller, if busy", cmd_soft_reset},
   {"asic-reset", "", "WRITES: full ASIC reset through PCI config (amdgpu's legacy VI reset)", cmd_asic_reset},

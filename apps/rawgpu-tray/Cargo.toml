@@ -1,0 +1,15 @@
+[package]
+name = "rawgpu-tray"
+description = "Menu bar app for the RX 590: card state, rawgpu eject, bring-up"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+tauri.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "code-search"
+description = "Search the EmbeddingGemma 2 index of ~/code, embedding queries on the RX 590 or the Mac"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+tauri.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true

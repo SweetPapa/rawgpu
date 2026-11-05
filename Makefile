@@ -108,7 +108,18 @@ build/examples/%: examples/%.c build/librawgpu.a include/rawgpu.h
 	@mkdir -p build/examples
 	$(CC) $(CFLAGS) -Iinclude -o $@ $< build/librawgpu.a
 
+# the menu bar app and Code Search (apps/README.md); Tauri's CLI comes through npx, pinned
+TAURI := npx -y @tauri-apps/cli@2.12.4
+APP_DIR := apps/target/release/bundle/macos
+apps: build/rawgpu
+	cd apps/rawgpu-tray && $(TAURI) build --bundles app
+	cd apps/code-search && $(TAURI) build --bundles app
+
+install-apps: apps
+	ditto "$(APP_DIR)/rawgpu.app" "$(HOME)/Applications/rawgpu.app"
+	ditto "$(APP_DIR)/Code Search.app" "$(HOME)/Applications/Code Search.app"
+
 clean:
 	rm -rf build
 
-.PHONY: all ids regs atom-names kernels examples clean
+.PHONY: all ids regs atom-names kernels examples apps install-apps clean
