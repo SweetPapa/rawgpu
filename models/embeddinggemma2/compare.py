@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Check rawgpu's EmbeddingGemma 2 against the reference (sentence-transformers on the CPU, float32):
-the same token ids, and embeddings that agree to cosine ~1. Includes a text long enough (>1000 tokens)
-to exercise the 512-token sliding window.
+the same token ids, and embeddings that agree to cosine ~1. Includes a text of about 1200 tokens and
+one of about 7000 (Python's argparse source), to exercise the 512-token sliding window, its 128-token
+tiles, and long positions.
 
   local/eg2-venv/bin/python models/embeddinggemma2/compare.py
 """
+import argparse
+import inspect
 import os
 import sys
 import time
@@ -26,6 +29,7 @@ TEXTS = [
     "Der schnelle braune Fuchs springt über den faulen Hund.",
     "東京は日本の首都です。",
     " ".join(["The Polaris architecture has 36 compute units, each with four SIMD units of sixteen lanes."] * 60),
+    inspect.getsource(argparse)[:24000],
 ]
 
 

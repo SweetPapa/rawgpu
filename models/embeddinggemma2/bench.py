@@ -6,13 +6,15 @@ the Wikipedia paragraphs that come with them.
   - corpus: every paragraph of the first --questions questions (20 each, about 120 tokens);
   - retrieval: each question searches the whole corpus; recall@k counts how many of its supporting
     paragraphs (2-4) land in the top k;
-  - long documents: each question's 20 paragraphs joined into one document of about 2000 tokens
-    (truncated to 2048), to exercise long sequences and the 512-token sliding window.
+  - long documents: each question's 20 paragraphs joined into one document of about 2400 tokens
+    (truncated to --max-seq, 2048 by default), to exercise long sequences and the 512-token sliding
+    window.
 
 Each device runs in a process of its own (MPS and a second GPU in one process make MPS run out of
 memory), saves its embeddings, and this process compares them.
 
-  local/eg2-venv/bin/python models/embeddinggemma2/bench.py [--questions 500] [--long 64] [--devices rx590,mps]
+  local/eg2-venv/bin/python models/embeddinggemma2/bench.py [--questions 500] [--long 64] [--max-seq 2048]
+                                                             [--devices rx590,mps]
 """
 import argparse
 import glob
@@ -74,7 +76,7 @@ def run(device, args):
     meta = {}
     if device == "rx590":
         from eg2 import EmbeddingGemma2
-        model = EmbeddingGemma2(verbose=False)
+        model = EmbeddingGemma2(max_seq=args.max_seq, verbose=False)
         enc = lambda texts, p: model.encode(texts, p)
         enc(paras[:64], "document")  # warm-up: compile, first touch
         D, t_d = timed(lambda: enc(paras, "document"))
@@ -89,7 +91,7 @@ def run(device, args):
         from sentence_transformers import SentenceTransformer
         from eg2 import PROMPTS
         st = SentenceTransformer("google/embeddinggemma-2", device="mps", model_kwargs={"torch_dtype": torch.float32})
-        st.max_seq_length = 2048  # as the RX 590 engine; unbounded otherwise
+        st.max_seq_length = args.max_seq  # as the RX 590 engine; unbounded otherwise
         # batches as large as MPS's memory allows: 32 short texts, 4 long ones
         enc = lambda texts, p, bs: st.encode(texts, prompt=PROMPTS[p], batch_size=bs, normalize_embeddings=True,
                                              convert_to_numpy=True, show_progress_bar=False)
@@ -105,6 +107,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--questions", type=int, default=500)
     ap.add_argument("--long", type=int, default=64, help="long documents to embed")
+    ap.add_argument("--max-seq", type=int, default=2048, help="truncate texts to this many tokens (at most 8192)")
     ap.add_argument("--devices", default="rx590,mps", help="comma-separated: rx590, mps")
     ap.add_argument("--run", help=argparse.SUPPRESS)
     ap.add_argument("--out", help=argparse.SUPPRESS)
@@ -121,7 +124,7 @@ def main():
         for dev in args.devices.split(","):
             out = os.path.join(tmp, dev + ".npz")
             subprocess.run([sys.executable, os.path.abspath(__file__), "--run", dev, "--out", out,
-                            "--questions", str(args.questions), "--long", str(args.long)],
+                            "--questions", str(args.questions), "--long", str(args.long), "--max-seq", str(args.max_seq)],
                            check=True, stderr=subprocess.DEVNULL)
             z = np.load(out)
             meta = json.loads(str(z["meta"]))

@@ -178,6 +178,18 @@ steps needs 218 VGPRs and drops to 3.3 TFLOPS. Small matrices are limited
 by parallelism: a 1024-square product has only 64 tiles for 36 compute
 units.
 
+Avoid leading dimensions that are multiples of a large power of two. A
+tile's 128 rows then collide in the caches or memory channels, and the
+`nt` form, where both operands are read along rows, suffers most. Pad each
+row by 4 or more floats. Measured with M = 8192, except the square case:
+
+| product | lda = ldb unpadded | padded by 32 floats |
+|---|---|---|
+| `nt`, N 512, K 2048 | 0.79 TFLOPS | 4.62 TFLOPS |
+| `nt`, N 4096, K 512 | 2.74 | 4.27 |
+| `nn`, N 512, K 2048 | 3.63 | 4.59 |
+| `nt`, 3072 square | 3.40 | 4.32 |
+
 ocml accuracy, from `rawgpu kernel-test`: the worst error in ULPs over
 65536 inputs per function, against the CPU in double precision. Every
 function is within its OpenCL 1.2 limit.

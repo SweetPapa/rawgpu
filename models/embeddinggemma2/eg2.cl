@@ -1,8 +1,10 @@
 /* EmbeddingGemma 2's text encoder on rawgpu: the row-wise and element-wise
  * steps. The matrix products are kernels/sgemm.cl's, which the engine
- * compiles into the same program. Everything is float32 and row-major.
- * Activations are [tokens, features], with tokens = batch x seq_len, each
- * sequence right-padded to seq_len.
+ * compiles into the same program (this file uses its TM, TK and band_keys).
+ * Everything is float32 and row-major. Activations are [tokens, features],
+ * with tokens = batch x seq_len, each sequence right-padded to seq_len; the
+ * matrices the products read have rows padded past a power of two (the
+ * *_stride arguments, in floats).
  *
  * The math follows transformers' modeling_embedding_gemma2.py:
  *   - RMSNorm is x * (mean(x^2) + eps)^-0.5 * weight (no 1 + weight);
@@ -58,32 +60,44 @@ void rmsnorm(__global const float *in, __global float *out, __global const float
   for (uint i = l; i < dim; i += WG) y[i] = x[i] * inv * (w ? w[i] : 1.0f);
 }
 
-/* x[row] = (x[row] + rmsnorm(o[row]) * w) * scale: a residual add after a post-norm */
+/* x[row] = (x[row] + rmsnorm(o[row]) * w) * scale: a residual add after a post-norm. Then, unless h is
+ * NULL, h[row] = rmsnorm(x[row]) * hw: the next block's input norm, as rmsnorm() would compute it. */
 __kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
-void add_rmsnorm(__global float *x, __global const float *o, __global const float *w, uint dim, float eps, float scale) {
+void add_rmsnorm(__global float *x, __global const float *o, __global const float *w, uint dim, uint x_stride,
+                 uint o_stride, float eps, float scale, __global float *h, __global const float *hw, uint h_stride) {
   __local float red[WG];
   size_t row = get_group_id(0);
   uint l = get_local_id(0);
-  __global float *xr = x + row * dim;
-  __global const float *orow = o + row * dim;
+  __global float *xr = x + row * x_stride;
+  __global const float *orow = o + row * o_stride;
   float s = 0.0f;
   for (uint i = l; i < dim; i += WG) s += orow[i] * orow[i];
   float inv = rsqrt(wg_sum(s, red) / (float)dim + eps);
-  for (uint i = l; i < dim; i += WG) xr[i] = (xr[i] + orow[i] * inv * w[i]) * scale;
+  float s2 = 0.0f;
+  for (uint i = l; i < dim; i += WG) {
+    float v = (xr[i] + orow[i] * inv * w[i]) * scale;
+    xr[i] = v;
+    s2 += v * v;
+  }
+  if (!h) return;
+  float inv2 = rsqrt(wg_sum(s2, red) / (float)dim + eps);
+  __global float *hr = h + row * h_stride;
+  for (uint i = l; i < dim; i += WG) hr[i] = xr[i] * inv2 * hw[i];
 }
 
-/* The fused q/k/v projection's output, in place: [tokens, (heads + 2 kv_heads) * hd], q heads first,
+/* The fused q/k/v projection's output, in place: [tokens, (heads + 2 kv_heads) * hd] (rows `stride`
+ * apart), q heads first,
  * then k, then v. One work-group per (token, head slot): RMS-norm the head (q and k with their weights,
  * v without), then rotate q and k by the token's position (RoPE, the rotate-half form, with the
  * frequencies from the host so they match torch's float32 ones). */
 __kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
 void qkv_post(__global float *qkv, __global const float *q_w, __global const float *k_w, __global const float *inv_freq,
-              uint heads, uint kv_heads, uint hd, uint seq_len, float eps) {
+              uint heads, uint kv_heads, uint hd, uint stride, uint seq_len, float eps) {
   __local float red[WG];
   uint slots = heads + 2 * kv_heads;
   size_t g = get_group_id(0), tok = g / slots;
   uint slot = (uint)(g % slots), l = get_local_id(0);
-  __global float *x = qkv + tok * (size_t)slots * hd + (size_t)slot * hd;
+  __global float *x = qkv + tok * stride + (size_t)slot * hd;
   bool is_q = slot < heads, is_k = !is_q && slot < heads + kv_heads;
   __global const float *w = is_q ? q_w : is_k ? k_w : 0;
   float s = 0.0f;
@@ -104,65 +118,68 @@ void qkv_post(__global float *qkv, __global const float *q_w, __global const flo
   }
 }
 
-/* Softmax of each row of the attention scores [batch * heads, seq_len (query), seq_len (key)], in
- * place, after masking: keys at or past the sequence's length, and for sliding layers keys `window`
- * or more positions from the query. A row with no visible key becomes all zeros. */
+/* Softmax of each row of the attention scores [batch * heads, seq_len (query), seq_len (key)] (rows
+ * `stride` apart), in place, after masking: keys at or past the sequence's length, and for sliding
+ * layers keys `window` or more positions from the query. Only the keys the P V product reads are
+ * touched: all of them, or with a window the query's tile's band_keys(), the rest of which may hold
+ * scores never computed. A row with no visible key becomes zeros. */
 __kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
-void softmax_mask(__global float *S, __global const uint *lens, uint heads, uint seq_len, uint window) {
+void softmax_mask(__global float *S, __global const uint *lens, uint heads, uint seq_len, uint stride, uint window) {
   __local float red[WG];
   size_t row = get_group_id(0);
   uint l = get_local_id(0);
   uint q = (uint)(row % seq_len), b = (uint)(row / seq_len / heads), len = lens[b];
-  __global float *r = S + row * seq_len;
+  __global float *r = S + row * stride;
   uint lo = 0, hi = len;
   if (window) {
     lo = q >= window ? q - window + 1 : 0;
     hi = min(hi, q + window);
   }
-  float m = -INFINITY;
-  for (uint j = lo + l; j < hi; j += WG) m = fmax(m, r[j]);
-  m = wg_max(m, red);
-  float s = 0.0f;
-  for (uint j = l; j < seq_len; j += WG) {
-    float e = (j >= lo && j < hi) ? exp(r[j] - m) : 0.0f;
-    r[j] = e;
-    s += e;
+  uint2 keys = band_keys(q / TM * TM, window, seq_len);
+  /* one pass for the maximum and the sum of exponentials together (each lane rescales its sum when its
+   * maximum grows), then one to write: the row is read twice and written once */
+  float m = -INFINITY, s = 0.0f;
+  for (uint j = lo + l; j < hi; j += WG) {
+    float v = r[j];
+    if (v > m) {
+      s = s * exp(m - v) + 1.0f;
+      m = v;
+    } else {
+      s += exp(v - m);
+    }
   }
-  s = wg_sum(s, red);
+  float mx = wg_max(m, red);
+  s = wg_sum(m > -INFINITY ? s * exp(m - mx) : 0.0f, red);
   float inv = s > 0.0f ? 1.0f / s : 0.0f;
-  for (uint j = l; j < seq_len; j += WG) r[j] *= inv;
+  for (uint j = keys.x + l; j < keys.y; j += WG) r[j] = (j >= lo && j < hi) ? exp(r[j] - mx) * inv : 0.0f;
 }
 
 /* out[t, i] = gelu(gu[t, i]) * gu[t, inter + i]: the MLP's gate and up halves from one fused product */
-__kernel void gelu_mul(__global const float *gu, __global float *out, uint inter, uint total) {
+__kernel void gelu_mul(__global const float *gu, __global float *out, uint inter, uint out_stride, uint total) {
   size_t i = get_global_id(0);
   if (i >= total) return;
   size_t t = i / inter, c = i % inter;
-  out[i] = gelu_tanh(gu[t * 2 * inter + c]) * gu[t * 2 * inter + inter + c];
+  out[t * out_stride + c] = gelu_tanh(gu[t * 2 * inter + c]) * gu[t * 2 * inter + inter + c];
 }
 
 /* g[t, c] = gelu(g[t, c]) * ple[t, layer, c]: the per-layer-embedding gate */
-__kernel void ple_gate(__global float *g, __global const float *ple, uint dim, uint layers, uint layer, uint total) {
+__kernel void ple_gate(__global float *g, __global const float *ple, uint dim, uint g_stride, uint layers, uint layer,
+                       uint total) {
   size_t i = get_global_id(0);
   if (i >= total) return;
   size_t t = i / dim, c = i % dim;
-  g[i] = gelu_tanh(g[i]) * ple[(t * layers + layer) * dim + c];
+  g[t * g_stride + c] = gelu_tanh(g[t * g_stride + c]) * ple[(t * layers + layer) * dim + c];
 }
 
-/* Mean over each sequence's real tokens, then L2-normalize: [batch, dim]. One work-group per sequence. */
-__kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
-void pool_normalize(__global const float *e, __global float *out, __global const uint *lens, uint seq_len, uint dim) {
-  __local float red[WG];
-  uint b = get_group_id(0), l = get_local_id(0), len = lens[b];
-  __global const float *base = e + (size_t)b * seq_len * dim;
-  float sq = 0.0f;
-  for (uint c = l; c < dim; c += WG) {
-    float acc = 0.0f;
-    for (uint t = 0; t < len; t++) acc += base[(size_t)t * dim + c];
-    acc /= (float)max(len, 1u);
-    out[(size_t)b * dim + c] = acc;
-    sq += acc * acc;
-  }
-  float inv = rsqrt(fmax(wg_sum(sq, red), 1e-24f));
-  for (uint c = l; c < dim; c += WG) out[(size_t)b * dim + c] *= inv;
+/* out[b, c] = the mean of e[b, t, c] over the sequence's real tokens: one work-item per (column,
+ * sequence). The host normalizes. */
+__kernel void pool_mean(__global const float *e, __global float *out, __global const uint *lens, uint seq_len, uint dim) {
+  uint c = get_global_id(0), b = get_global_id(1);
+  if (c >= dim) return;
+  uint len = lens[b];
+  __global const float *p = e + (size_t)b * seq_len * dim + c;
+  float acc = 0.0f;
+#pragma unroll 8
+  for (uint t = 0; t < len; t++) acc += p[(size_t)t * dim];
+  out[(size_t)b * dim + c] = acc / (float)max(len, 1u);
 }

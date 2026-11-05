@@ -2,6 +2,59 @@
 
 Dated, factual notes from real hardware. Newest first.
 
+## 2026-11-05: EmbeddingGemma 2 1.56x faster: padded rows, windowed attention, 8K inputs
+
+A per-kernel profile of a 2048-token batch showed most of the products far
+below the SGEMM's speed. The sliding layers' score product ran at 0.9
+TFLOPS and the MLP down-projection at 1.4.
+
+**The cause was the row strides.** Every operand's leading dimension was a
+power of two (512, 1024, 2048 floats). Measured alone, with M = 8192:
+
+| product | unpadded | rows padded by 32 floats |
+|---|---|---|
+| `nt`, N 512, K 2048 | 0.79 TFLOPS | 4.62 TFLOPS |
+| `nt`, N 4096, K 512 | 2.74 | 4.27 |
+| scores, `nt`, 2048 × 2048 × 256 | 0.63 | 3.25 |
+| P·V, `nn`, 2048 × 256 × 2048 | 1.57 | 2.97 |
+
+- **Which operands matter:** padding A and B fixes it, and C hardly
+  matters.
+- **How much padding:** 4 floats is enough.
+- **The fix:** `eg2.py` pads the rows of every weight and of every
+  activation a product reads, including the attention scores.
+
+**Then sliding-window attention.** The batched kernels take a `window`
+argument.
+- **Scores:** the score product skips 128 × 128 tiles with no |q - k| below
+  the window.
+- **Softmax:** it touches only the keys its query's tile can see (the
+  shared `band_keys()`).
+- **P·V:** the product multiplies over just those keys.
+
+At 2048 tokens that's 9 of 16 tiles. The skipped terms were exact zeros, so
+nothing changes numerically.
+
+**Three smaller changes:**
+- **Softmax:** it finds the maximum and the sum in a single online pass.
+- **Norms:** the RMSNorm after each residual add is fused into the add.
+- **Pooling:** it runs per column. One work-group had been pooling a whole
+  8192-token sequence, at 30 ms against 1 ms now.
+
+**Results:**
+- **Tokens per second, per forward pass:** 6.5k to 11.6k at 128 tokens, and
+  3.3k to 8.1k at 2048.
+- **Context:** `max_seq` is now 8192, with the scores buffer at 1.1 GB, and
+  one 8192-token sequence runs at 5.2k tokens/s.
+- **Against the reference:** `compare.py` now includes a 5998-token text.
+  Every embedding still agrees with the reference to cosine 1.000000.
+- **MuSiQue, 500 questions:** the RX 590 took 98 s, down from 152 s, with
+  rates of 89 / 277 / 3.8 per second. The M4 Pro's MPS took about 245 s
+  (36 / 92 / 1.5 per second), so the RX 590 ran about 2.5x as fast.
+  Recall is unchanged.
+- **The library:** `rawgpu_sgemm()` is unchanged at 4.83 TFLOPS at 3072,
+  and `docs/LIBRARY.md` now has a note on padding.
+
 ## 2026-11-04: EmbeddingGemma 2 on the card, and a stale fence after an unclean exit
 
 `models/embeddinggemma2/` runs Google's EmbeddingGemma 2 text encoder end to

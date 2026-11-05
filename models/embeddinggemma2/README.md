@@ -19,21 +19,31 @@ d = model.encode(docs, prompt="document")       # unit vectors: q @ d.T is cosin
   SGEMM, plus batched variants for attention. The row and element-wise steps
   are in `eg2.cl`: RMSNorm, per-head norms with RoPE, masked softmax, GELU
   gates, and pooling.
-- **VRAM:** the layer weights take 496 MB, and activations are sized for
-  16384 tokens per batch.
+- **Padded rows:** every matrix a product reads has its rows padded by 32
+  floats. At the model's power-of-two widths the SGEMM runs 1.5-6x slower
+  otherwise (`docs/LIBRARY.md`).
+- **Sliding-window attention:** on the 20 sliding layers, the score product
+  skips the 128 × 128 tiles that lie wholly outside the ±512-token window.
+  Softmax touches only the keys each query's tile can see, and P·V
+  multiplies only over those keys. At 2048 tokens that's 9 of 16 tiles.
+  Skipping zeros changes nothing, so the results are the same as computing
+  the full matrix.
+- **VRAM:** the layer weights take 520 MB. Activations are sized for 16384
+  tokens per batch, and the scores for one 8192-token sequence (1.1 GB).
 - **Token embedding table:** the 262144 × 512 table stays in Mac memory as
   bf16. Only a batch's rows are sent.
-- **Sequence length:** up to 2048 tokens. Attention materializes the full
-  score matrix, so longer inputs are truncated.
+- **Sequence length:** up to 8192 tokens (`max_seq`); longer inputs are
+  truncated. The 4 full-attention layers compute the whole score matrix, so
+  their cost grows with the square of the length.
 - **Prompts:** the model's own prompts are in `PROMPTS`. For retrieval, use
   `"query"` and `"document"`.
 
 ## Checking it
 
-`compare.py` runs eight texts in English, German, Japanese and code,
-including one of 1209 tokens that crosses the 512-token sliding window. It
-runs them through this engine and through the reference
-(sentence-transformers, float32, CPU). It checks two things:
+`compare.py` runs nine texts in English, German, Japanese and code. One is
+1209 tokens, crossing the 512-token sliding window, and one is 5998 tokens
+(Python's argparse source). It runs them through this engine and through
+the reference (sentence-transformers, float32, CPU). It checks two things:
 
 - the token ids are identical;
 - the embeddings agree to cosine ≥ 0.9999.
@@ -54,25 +64,35 @@ Pro's GPU (PyTorch MPS, float32), each in its own process:
 local/eg2-venv/bin/python models/embeddinggemma2/bench.py --questions 500
 ```
 
-Results from 2026-11-04 (500 questions, 7029 paragraphs averaging 119
+Results from 2026-11-05 (500 questions, 7029 paragraphs averaging 119
 tokens, 64 joined documents averaging 1926 tokens):
 
 | | paragraphs | questions | 2K-token documents | recall@1 / 5 / 10 / 20 |
 |---|---|---|---|---|
-| RX 590 (rawgpu, fp32) | **62/s**, 7.4k tok/s | **184/s** | **1.8/s**, 3.4k tok/s | 0.390 / 0.668 / 0.734 / 0.800 |
-| M4 Pro GPU (MPS, fp32) | 35/s, 4.2k tok/s | 160/s | 1.5/s, 2.9k tok/s | 0.390 / 0.668 / 0.734 / 0.800 |
+| RX 590 (rawgpu, fp32) | **89/s**, 10.6k tok/s | **277/s** | **3.8/s**, 7.3k tok/s | 0.390 / 0.668 / 0.734 / 0.800 |
+| M4 Pro GPU (MPS, fp32) | 36/s, 4.3k tok/s | 92/s | 1.5/s, 2.9k tok/s | 0.390 / 0.668 / 0.734 / 0.800 |
 
-- **Total time:** the RX 590 took 152 s and the M4 Pro 246 s, so the RX 590
-  ran 1.61x as fast.
+- **Total time:** the RX 590 took 98 s and the M4 Pro about 245 s, so the
+  RX 590 ran about 2.5x as fast. On 2026-11-04 the RX 590 took 152 s,
+  before rows were padded and sliding layers were windowed.
 - **Agreement:** the two embeddings of every text agree to cosine 1.000000.
-- **Card state:** the engine ran at about 1420-1450 MHz and reached 76 C.
+- **Card state:** the engine was at 1287 MHz and 73 C at the end.
+- **M4 Pro variance:** its time depends on what else is using the Mac's
+  GPU. Two runs took 243 s and 246 s, and a third, with a browser busy,
+  took 304 s. Its question rate ranged from 89 to 160 per second.
 - **Batch sizes on the Mac:** MPS ran with batch 32 for short texts and 4 for
   long documents. Batch 64 ran out of MPS memory on the long documents.
 
-**Where the time goes on the RX 590:**
-- **Short texts:** the GEMMs dominate. About 280 MFLOP per token makes this
-  roughly 2 TFLOPS sustained.
-- **Long documents:** attention computes and masks the whole 2048 × 2048
-  score matrix. On sliding layers fewer than half of those scores are
-  visible, so a windowed or flash-style attention kernel is the obvious next
-  speedup.
+Where the time goes in one forward pass. Each launch was waited on and timed
+separately, so the small kernels' shares include some launch overhead:
+
+| | 64 × 128 tokens | 8 × 2048 tokens | 1 × 8192 tokens |
+|---|---|---|---|
+| tokens per second (normal, pipelined) | 11.6k | 8.1k | 5.2k |
+| linear layers (SGEMM, ~4 TFLOPS) | 73% | 53% | 37% |
+| attention products (3.7-4.5 TFLOPS) | 7% | 29% | 47% |
+| norms, softmax, GELU, RoPE, pooling | 20% | 18% | 17% |
+
+The linear layers now run near this SGEMM's ceiling of 4.6-4.8 TFLOPS.
+Further gains would need a faster SGEMM, or fewer passes over memory for
+the row-wise steps, by fusing them into the products.

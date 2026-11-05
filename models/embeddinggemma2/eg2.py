@@ -14,6 +14,11 @@ costs less than keeping the table on the card.
 The math follows transformers' modeling_embedding_gemma2.py; compare.py
 checks it against that implementation. The model's prompts are in PROMPTS;
 use "query" and "document" for retrieval.
+
+Every matrix a product reads has its rows padded by PAD floats: at the
+model's power-of-two widths (512, 1024, 2048) the SGEMM runs 1.5-6x slower
+unpadded. Sliding-window layers compute only the attention scores within
+the window (in 128 x 128 tiles) and multiply only those by V.
 """
 import json
 import os
@@ -24,6 +29,8 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "python"))
 import rawgpu  # noqa: E402
+
+PAD = 32  # floats past the end of each row of a product's operands
 
 PROMPTS = {  # config_sentence_transformers.json
     "query": "task: search result | query: ",
@@ -67,8 +74,20 @@ class _Safetensors:
         return self.f[self.base + a:self.base + b].view(np.uint16).reshape(m["shape"])
 
 
+class _Weight:
+    """A linear layer's weight [n, k] in VRAM, its rows PAD floats longer than k."""
+
+    def __init__(self, gpu, w):
+        self.n, self.k = w.shape
+        self.ld = self.k + PAD
+        a = np.zeros((self.n, self.ld), np.float32)
+        a[:, :self.k] = w
+        self.buf = gpu.array(a)
+        self.nbytes = self.buf.nbytes
+
+
 class EmbeddingGemma2:
-    def __init__(self, gpu=None, repo="google/embeddinggemma-2", path=None, max_tokens=16384, max_seq=2048,
+    def __init__(self, gpu=None, repo="google/embeddinggemma-2", path=None, max_tokens=16384, max_seq=8192,
                  verbose=True):
         self.gpu = gpu or rawgpu.Device()
         path = path or _snapshot(repo)
@@ -94,10 +113,11 @@ class EmbeddingGemma2:
 
         g = self.gpu
         up = lambda a: g.array(np.ascontiguousarray(a, np.float32))
-        self.w_ple = up(st.fp32(pre + "ple.per_layer_model_projection.weight"))   # [L*P, D]
+        lin = lambda a: _Weight(g, a)
+        self.w_ple = lin(st.fp32(pre + "ple.per_layer_model_projection.weight"))  # [L*P, D]
         self.w_ple_norm = up(st.fp32(pre + "ple.per_layer_projection_norm.weight"))
         self.w_norm = up(st.fp32(pre + "norm.weight"))
-        self.w_proj = up(st.fp32(pre + "embedding_projection.weight"))            # [E, D]
+        self.w_proj = lin(st.fp32(pre + "embedding_projection.weight"))           # [E, D]
         self.layers = []
         for i in range(self.L):
             lp = f"{pre}layers.{i}."
@@ -111,51 +131,51 @@ class EmbeddingGemma2:
             w = lambda n: st.fp32(lp + n)
             self.layers.append(dict(
                 hd=hd, kv=kv, sliding=kind == "sliding_attention",
-                qkv=up(np.concatenate([w("self_attn.q_proj.weight"), w("self_attn.k_proj.weight"),
-                                       w("self_attn.v_proj.weight")])),
+                qp=(self.H + 2 * kv) * hd + PAD, ap=self.H * hd + PAD,  # row pitches of qkv and att
+                qkv=lin(np.concatenate([w("self_attn.q_proj.weight"), w("self_attn.k_proj.weight"),
+                                        w("self_attn.v_proj.weight")])),
                 q_norm=up(w("self_attn.q_norm.weight")), k_norm=up(w("self_attn.k_norm.weight")),
-                o=up(w("self_attn.o_proj.weight")), inv_freq=up(inv_freq),
+                o=lin(w("self_attn.o_proj.weight")), inv_freq=up(inv_freq),
                 in_ln=up(w("input_layernorm.weight")), post_attn=up(w("post_attention_layernorm.weight")),
                 pre_ff=up(w("pre_feedforward_layernorm.weight")), post_ff=up(w("post_feedforward_layernorm.weight")),
-                gu=up(np.concatenate([w("mlp.gate_proj.weight"), w("mlp.up_proj.weight")])),
-                down=up(w("mlp.down_proj.weight")),
-                ple_gate=up(w("ple_block.per_layer_input_gate.weight")),
-                ple_proj=up(w("ple_block.per_layer_projection.weight")),
+                gu=lin(np.concatenate([w("mlp.gate_proj.weight"), w("mlp.up_proj.weight")])),
+                down=lin(w("mlp.down_proj.weight")),
+                ple_gate=lin(w("ple_block.per_layer_input_gate.weight")),
+                ple_proj=lin(w("ple_block.per_layer_projection.weight")),
                 ple_norm=up(w("ple_block.post_per_layer_input_norm.weight")),
                 scalar=float(w("layer_scalar")[0])))
 
         src = open(os.path.join(HERE, "..", "..", "kernels", "sgemm.cl")).read() + "\n" + open(os.path.join(HERE, "eg2.cl")).read()
         self.k = g.program(src)
 
-        # activations, sized for max_tokens tokens at once
+        # activations, sized for max_tokens tokens at once; the ones products read have padded rows
         n = max_tokens
-        qkv_w = max((self.H + 2 * l["kv"]) * l["hd"] for l in self.layers)
-        att_w = max(self.H * l["hd"] for l in self.layers)
-        self.x = g.empty((n, self.D))
-        self.h = g.empty((n, self.D))
-        self.qkv = g.empty((n, qkv_w))
-        self.att = g.empty((n, att_w))
+        self.xp, self.hp, self.actp = self.D + PAD, max(self.D, self.P) + PAD, self.I + PAD
+        self.x = g.empty((n, self.xp))
+        self.h = g.empty((n, self.hp))
+        self.qkv = g.empty((n, max(l["qp"] for l in self.layers)))
+        self.att = g.empty((n, max(l["ap"] for l in self.layers)))
         self.o = g.empty((n, self.D))
         self.gu = g.empty((n, 2 * self.I))
-        self.act = g.empty((n, self.I))
+        self.act = g.empty((n, self.actp))
         self.ple = g.empty((n, self.L * self.P))
         self.e = g.empty((n, self.E))
-        self.scores_bytes = 256 << 20
+        self.scores_bytes = 4 * self.H * max_seq * (max_seq + PAD)  # one sequence of max_seq, every head
         self.S = g.empty(self.scores_bytes // 4)
         self.max_batch = 1024
         self.lens = g.empty(self.max_batch, np.uint32)
         self.out = g.empty((self.max_batch, self.E))
         if verbose:
-            mb = sum(b.nbytes for l in self.layers for b in l.values() if isinstance(b, rawgpu.Buffer)) >> 20
+            mb = sum(b.nbytes for l in self.layers for b in l.values() if isinstance(b, (rawgpu.Buffer, _Weight))) >> 20
             print(f"EmbeddingGemma 2: {self.L} layers, {mb} MB of layer weights in VRAM "
                   f"(+{(self.w_ple.nbytes + self.w_proj.nbytes) >> 20} MB PLE and projection); "
                   f"{g.info['vram_free_bytes'] >> 20} MB VRAM free")
 
     # ---- the pieces ----
-    def _gemm_nt(self, A, W, C, M, N, K, alpha=1.0):
-        """C[M, N] = alpha * A[M, K] @ W[N, K]^T"""
-        self.k.sgemm_nt(A, W, C, M, N, K, K, K, N, alpha, 0.0,
-                        global_size=((N + 127) // 128 * 16, (M + 127) // 128 * 16), local_size=(16, 16))
+    def _linear(self, A, lda, W, C, ldc, M, alpha=1.0):
+        """C[M, W.n] = alpha * A[M, W.k] @ W^T, rows lda and ldc floats apart"""
+        self.k.sgemm_nt(A, W.buf, C, M, W.n, W.k, lda, W.ld, ldc, alpha, 0.0,
+                        global_size=((W.n + 127) // 128 * 16, (M + 127) // 128 * 16), local_size=(16, 16))
 
     def _rows(self, fn, rows, *args):
         fn(*args, global_size=rows * 64, local_size=64)
@@ -165,60 +185,70 @@ class EmbeddingGemma2:
 
     def _forward(self, ids, lens, T, tap=None):
         """ids [B, T] int, lens [B]: queue the forward pass; returns the event of the last launch.
-        tap(name, buffer, rows, cols), if given, is called at each step (for checking against the reference)."""
+        tap(name, buffer, rows, cols, pitch), if given, is called at each step (for checking against the
+        reference): the step's result is rows x cols, rows pitch floats apart."""
         tap = tap or (lambda *a: None)
-        k, D, H = self.k, self.D, self.H
+        k, D, H, P = self.k, self.D, self.H, self.P
         B = ids.shape[0]
         N = B * T
-        x = self.embed[ids.reshape(-1)].astype(np.uint32) << 16  # bf16 rows to fp32, scaled
-        x = x.view(np.float32) * self.embed_scale
-        self.x.write(np.ascontiguousarray(x, np.float32))
+        x = np.zeros((N, self.xp), np.float32)
+        x[:, :D] = (self.embed[ids.reshape(-1)].astype(np.uint32) << 16).view(np.float32)  # bf16 rows to fp32
+        x[:, :D] *= self.embed_scale
+        self.x.write(x)
         self.lens.write(np.asarray(lens, np.uint32))
-        tap("embed", self.x, N, D)
+        tap("embed", self.x, N, D, self.xp)
         # per-layer embeddings: rmsnorm((x @ W_ple^T) * D^-0.5) over each layer's P-wide slice
-        self._gemm_nt(self.x, self.w_ple, self.ple, N, self.L * self.P, D, alpha=D ** -0.5)
-        self._rows(k.rmsnorm, N * self.L, self.ple, self.ple, self.w_ple_norm, self.P, self.P, self.P, self.eps)
-        tap("ple", self.ple, N, self.L * self.P)
+        self._linear(self.x, self.xp, self.w_ple, self.ple, self.L * P, N, alpha=D ** -0.5)
+        self._rows(k.rmsnorm, N * self.L, self.ple, self.ple, self.w_ple_norm, P, P, P, self.eps)
+        tap("ple", self.ple, N, self.L * P, self.L * P)
+        sp = T + PAD  # the scores' row pitch
+        tiles = lambda n: (n + 127) // 128 * 16
+        # h = the next block's normed input. The residual adds that precede a norm compute it.
+        self._rows(k.rmsnorm, N, self.x, self.h, self.layers[0]["in_ln"], D, self.xp, self.hp, self.eps)
         for i, l in enumerate(self.layers):
-            hd, kv = l["hd"], l["kv"]
+            hd, kv, qp, ap = l["hd"], l["kv"], l["qp"], l["ap"]
             slots = H + 2 * kv
-            ld = slots * hd
+            window = self.window if l["sliding"] else 0
             # attention
-            self._rows(k.rmsnorm, N, self.x, self.h, l["in_ln"], D, D, D, self.eps)
-            self._gemm_nt(self.h, l["qkv"], self.qkv, N, ld, D)
-            tap(f"{i}.qkv_proj", self.qkv, N, ld)
-            self._rows(k.qkv_post, N * slots, self.qkv, l["q_norm"], l["k_norm"], l["inv_freq"], H, kv, hd, T, self.eps)
-            tap(f"{i}.qkv_rope", self.qkv, N, ld)
-            # scores[b, h] = Q[b, h] @ K[b, h / group]^T, one product per (sequence, head)
-            k.sgemm_batched_nt(self.qkv, self.qkv.at(H * hd * 4), self.S, T, T, hd, ld, ld, T, 1.0, 0.0,
-                               H, H // kv, T * ld, hd, T * ld, hd, H * T * T, T * T,
-                               global_size=((T + 127) // 128 * 16, (T + 127) // 128 * 16, B * H), local_size=(16, 16, 1))
-            self._rows(k.softmax_mask, B * H * T, self.S, self.lens, H, T, self.window if l["sliding"] else 0)
-            # att[b, t, h] = P[b, h] @ V[b, h / group]
-            k.sgemm_batched_nn(self.S, self.qkv.at((H + kv) * hd * 4), self.att, T, hd, T, T, ld, H * hd, 1.0, 0.0,
-                               H, H // kv, H * T * T, T * T, T * ld, hd, T * H * hd, hd,
-                               global_size=((hd + 127) // 128 * 16, (T + 127) // 128 * 16, B * H), local_size=(16, 16, 1))
-            tap(f"{i}.att", self.att, N, H * hd)
-            self._gemm_nt(self.att, l["o"], self.o, N, D, H * hd)
-            self._rows(k.add_rmsnorm, N, self.x, self.o, l["post_attn"], D, self.eps, 1.0)
-            tap(f"{i}.after_attn", self.x, N, D)
+            self._linear(self.h, self.hp, l["qkv"], self.qkv, qp, N)
+            tap(f"{i}.qkv_proj", self.qkv, N, slots * hd, qp)
+            self._rows(k.qkv_post, N * slots, self.qkv, l["q_norm"], l["k_norm"], l["inv_freq"], H, kv, hd, qp, T,
+                       self.eps)
+            tap(f"{i}.qkv_rope", self.qkv, N, slots * hd, qp)
+            # scores[b, h] = Q[b, h] @ K[b, h / group]^T, one product per (sequence, head); with a window,
+            # only the tiles that hold visible scores
+            k.sgemm_batched_nt(self.qkv, self.qkv.at(H * hd * 4), self.S, T, T, hd, qp, qp, sp, 1.0, 0.0,
+                               H, H // kv, T * qp, hd, T * qp, hd, H * T * sp, T * sp, window,
+                               global_size=(tiles(T), tiles(T), B * H), local_size=(16, 16, 1))
+            self._rows(k.softmax_mask, B * H * T, self.S, self.lens, H, T, sp, window)
+            # att[b, t, h] = P[b, h] @ V[b, h / group], over the keys each tile of queries can see
+            k.sgemm_batched_nn(self.S, self.qkv.at((H + kv) * hd * 4), self.att, T, hd, T, sp, qp, ap, 1.0, 0.0,
+                               H, H // kv, H * T * sp, T * sp, T * qp, hd, T * ap, hd, window,
+                               global_size=(tiles(hd), tiles(T), B * H), local_size=(16, 16, 1))
+            tap(f"{i}.att", self.att, N, H * hd, ap)
+            self._linear(self.att, ap, l["o"], self.o, D, N)
+            self._rows(k.add_rmsnorm, N, self.x, self.o, l["post_attn"], D, self.xp, D, self.eps, 1.0,
+                       self.h, l["pre_ff"], self.hp)
+            tap(f"{i}.after_attn", self.x, N, D, self.xp)
             # MLP
-            self._rows(k.rmsnorm, N, self.x, self.h, l["pre_ff"], D, D, D, self.eps)
-            self._gemm_nt(self.h, l["gu"], self.gu, N, 2 * self.I, D)
-            self._elem(k.gelu_mul, N * self.I, self.gu, self.act, self.I, N * self.I)
-            self._gemm_nt(self.act, l["down"], self.o, N, D, self.I)
-            self._rows(k.add_rmsnorm, N, self.x, self.o, l["post_ff"], D, self.eps, 1.0)
-            tap(f"{i}.after_mlp", self.x, N, D)
+            self._linear(self.h, self.hp, l["gu"], self.gu, 2 * self.I, N)
+            self._elem(k.gelu_mul, N * self.I, self.gu, self.act, self.I, self.actp, N * self.I)
+            self._linear(self.act, self.actp, l["down"], self.o, D, N)
+            self._rows(k.add_rmsnorm, N, self.x, self.o, l["post_ff"], D, self.xp, D, self.eps, 1.0, None, None, 0)
+            tap(f"{i}.after_mlp", self.x, N, D, self.xp)
             # per-layer-embedding block, then the layer scalar
-            self._gemm_nt(self.x, l["ple_gate"], self.h, N, self.P, D)
-            self._elem(k.ple_gate, N * self.P, self.h, self.ple, self.P, self.L, i, N * self.P)
-            self._gemm_nt(self.h, l["ple_proj"], self.o, N, D, self.P)
-            self._rows(k.add_rmsnorm, N, self.x, self.o, l["ple_norm"], D, self.eps, l["scalar"])
-            tap(f"{i}.out", self.x, N, D)
-        self._rows(k.rmsnorm, N, self.x, self.h, self.w_norm, D, D, D, self.eps)
-        self._gemm_nt(self.h, self.w_proj, self.e, N, self.E, D)
-        tap("proj", self.e, N, self.E)
-        return k.pool_normalize(self.e, self.out, self.lens, T, self.E, global_size=B * 64, local_size=64)
+            self._linear(self.x, self.xp, l["ple_gate"], self.h, self.hp, N)
+            self._elem(k.ple_gate, N * P, self.h, self.ple, P, self.hp, self.L, i, N * P)
+            self._linear(self.h, self.hp, l["ple_proj"], self.o, D, N)
+            next_norm = self.layers[i + 1]["in_ln"] if i + 1 < self.L else self.w_norm
+            self._rows(k.add_rmsnorm, N, self.x, self.o, l["ple_norm"], D, self.xp, D, self.eps, l["scalar"],
+                       self.h, next_norm, self.hp)
+            tap(f"{i}.out", self.x, N, D, self.xp)
+        self._linear(self.h, self.hp, self.w_proj, self.e, self.E, N)
+        tap("proj", self.e, N, self.E, self.E)
+        # mean over each sequence's tokens; encode() normalizes
+        return k.pool_mean(self.e, self.out, self.lens, T, self.E, global_size=((self.E + 63) // 64 * 64, B),
+                           local_size=(64, 1))
 
     # ---- the API ----
     def tokenize(self, texts, prompt=None):
@@ -242,7 +272,7 @@ class EmbeddingGemma2:
         while pos < len(order):
             T = len(seqs[order[pos]])
             T = (T + 7) // 8 * 8
-            cap = min(self.max_tokens // T, self.scores_bytes // (4 * self.H * T * T), self.max_batch)
+            cap = min(self.max_tokens // T, self.scores_bytes // (4 * self.H * T * (T + PAD)), self.max_batch)
             idx = order[pos:pos + max(cap, 1)]
             ids = np.zeros((len(idx), T), np.int64)
             lens = []
@@ -257,7 +287,7 @@ class EmbeddingGemma2:
             pos += len(idx)
         if dim and dim < self.E:
             out = out[:, :dim]
-            out /= np.linalg.norm(out, axis=1, keepdims=True)
+        out /= np.maximum(np.linalg.norm(out, axis=1, keepdims=True), 1e-12)
         if return_stats:
             return out, dict(tokens=tokens, padded_tokens=padded, batches=batches)
         return out
