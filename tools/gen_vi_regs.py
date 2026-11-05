@@ -64,8 +64,8 @@ REGS = [
     "FIRMWARE_FLAGS", "SMU_FIRMWARE", "SMU_STATUS", "SMU_INPUT_DATA", "ROM_INDEX", "ROM_DATA",
     "CG_SPLL_FUNC_CNTL*", "CG_CLKPIN_CNTL", "CG_CLKPIN_CNTL_2", "SMU_SMC_IND_INDEX", "SMU_SMC_IND_DATA",
     "RCU_UC_EVENTS", "SMC_MSG_ARG_1", "SMC_RESP_1", "SMC_MESSAGE_1",
-    # thermal: smu7_thermal_get_temperature()
-    "CG_MULT_THERMAL_STATUS",
+    # thermal: smu7_thermal_get_temperature(), smu7_fan_ctrl_get_fan_speed_pwm()
+    "CG_MULT_THERMAL_STATUS", "CG_THERMAL_STATUS", "CG_FDO_CTRL1",
     # GFX v8 bring-up for compute: gfx_v8_0 golden settings (polaris10), constants, RLC, MEC queues
     "ATC_MISC_CG", "CB_HW_CONTROL", "CB_HW_CONTROL_2", "CB_HW_CONTROL_3", "DB_DEBUG2", "PA_SC_ENHANCE",
     "PA_SC_LINE_STIPPLE_STATE", "PA_SC_RASTER_CONFIG", "PA_SC_RASTER_CONFIG_1", "RLC_CGCG_CGLS_CTRL_3D",

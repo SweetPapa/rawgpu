@@ -3,10 +3,16 @@
 #include "rg.h"
 
 #include <errno.h>
+#include <libproc.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <time.h>
+#include <unistd.h>
 
 static const char *usage =
   "usage: rawgpu [--sock PATH] <command>\n"
@@ -18,6 +24,9 @@ static const char *usage =
   "  bench [N]        round-trip latency of config and register reads\n"
   "  dma-test [KB]    allocate a DMA buffer and print its bus addresses (no GPU activity)\n"
   "  reset            WRITES: PCIe reset through TinyGPU (FLR, else hot reset); a no-op on the RX 590\n"
+  "  eject [--timeout SECONDS]\n"
+  "                   wait for the program using the card to finish, stop the card's engines, close it,\n"
+  "                   and stop the TinyGPU server; then says it is safe to unplug\n"
   "  kernel-info FILE describe the kernels in a code object (no GPU needed)\n";
 
 static void print_backend_usage(FILE *f, const rg_backend *b) {
@@ -140,6 +149,185 @@ static int cmd_dma_test(rg_dev *d, size_t kb) {
   return 0;
 }
 
+/* ---- rawgpu eject ---- */
+
+#define TINYGPU_EXE "/TinyGPU.app/Contents/MacOS/TinyGPU"
+
+static bool is_tinygpu_process(int pid) {
+  char path[PROC_PIDPATHINFO_MAXSIZE];
+  if (pid <= 0 || proc_pidpath(pid, path, sizeof path) <= 0) return false;
+  size_t n = strlen(path), m = strlen(TINYGPU_EXE);
+  return n >= m && !strcmp(path + n - m, TINYGPU_EXE);
+}
+
+/* a and b name the same path, ignoring repeated slashes ($TMPDIR ends in one) */
+static bool same_path(const char *a, const char *b) {
+  for (;;) {
+    while (a[0] == '/' && a[1] == '/') a++;
+    while (b[0] == '/' && b[1] == '/') b++;
+    if (*a != *b) return false;
+    if (!*a) return true;
+    a++, b++;
+  }
+}
+
+/* Is pid `TinyGPU server <sock>`? Reads its arguments (KERN_PROCARGS2: argc, the executable path, then
+ * the argument strings). */
+static bool serves_socket(int pid, const char *sock) {
+  if (!is_tinygpu_process(pid)) return false;
+  int mib[3] = {CTL_KERN, KERN_PROCARGS2, pid};
+  char buf[16384];
+  size_t size = sizeof buf;
+  if (sysctl(mib, 3, buf, &size, NULL, 0) || size < sizeof(int)) return false;
+  int argc;
+  memcpy(&argc, buf, sizeof argc);
+  char *p = buf + sizeof argc, *end = buf + size;
+  p += strnlen(p, (size_t)(end - p)); /* the executable path, then padding */
+  while (p < end && !*p) p++;
+  const char *argv[3] = {0};
+  for (int i = 0; i < argc && i < 3 && p < end; i++) {
+    argv[i] = p;
+    p += strnlen(p, (size_t)(end - p)) + 1;
+  }
+  return argc >= 3 && argv[1] && !strcmp(argv[1], "server") && argv[2] && same_path(argv[2], sock);
+}
+
+/* Processes running TinyGPU.app's executable: the server for `sock` (if any) in *server, the count of
+ * others (a server some other program started, e.g. tinygrad's) returned, the first of them in *other. */
+static int tinygpu_processes(const char *sock, int *server, int *other) {
+  *server = *other = 0;
+  int n = proc_listallpids(NULL, 0);
+  if (n <= 0) return 0;
+  size_t cap = (size_t)n + 64;
+  pid_t *all = calloc(cap, sizeof *all);
+  if (!all) return 0;
+  n = proc_listallpids(all, (int)(cap * sizeof *all));
+  int others = 0;
+  for (int i = 0; i < n; i++) {
+    if (all[i] == getpid() || !is_tinygpu_process(all[i])) continue;
+    if (!*server && serves_socket(all[i], sock)) *server = all[i];
+    else if (!others++) *other = all[i];
+  }
+  free(all);
+  return others;
+}
+
+/* How many clients the server is connected to: its AF_UNIX sockets other than the listening one. A
+ * look at its file descriptors, so it neither queues behind the client nor disturbs it. -1 if unknown. */
+static int server_clients(int pid) {
+  int bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, NULL, 0);
+  if (bytes <= 0) return -1;
+  struct proc_fdinfo *fds = malloc((size_t)bytes);
+  if (!fds) return -1;
+  bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fds, bytes);
+  int n = bytes > 0 ? bytes / (int)sizeof *fds : 0, clients = 0;
+  for (int i = 0; i < n; i++) {
+    if (fds[i].proc_fdtype != PROX_FDTYPE_SOCKET) continue;
+    struct socket_fdinfo si;
+    if (proc_pidfdinfo(pid, fds[i].proc_fd, PROC_PIDFDSOCKETINFO, &si, sizeof si) != sizeof si) continue;
+    if (si.psi.soi_family == AF_UNIX && !(si.psi.soi_options & SO_ACCEPTCONN)) clients++;
+  }
+  free(fds);
+  return bytes > 0 ? clients : -1;
+}
+
+static bool process_gone(int pid, double seconds) {
+  for (double t = 0; t < seconds; t += 0.1) {
+    if (kill(pid, 0) && errno == ESRCH) return true;
+    nanosleep(&(struct timespec){0, 100 * 1000 * 1000}, NULL);
+  }
+  return kill(pid, 0) && errno == ESRCH;
+}
+
+static int not_safe_others(int n, int pid) {
+  printf("But %d other TinyGPU process%s run%s (pid %d), so another program may have the card.\n"
+         "NOT safe to unplug until %s.\n", n, n > 1 ? "es" : "", n > 1 ? "" : "s", pid, n > 1 ? "they exit" : "it exits");
+  return -EBUSY;
+}
+
+/* `rawgpu eject`: release the card so the enclosure can be unplugged. The server takes one client at a
+ * time, so while another program has the card this waits. Then it attaches, has the backend stop the
+ * engines (nothing left reading or writing host memory), disconnects (the server unmaps the BARs and
+ * DMA buffers), and stops the server. The server has no shutdown request or signal handler; SIGTERM
+ * ends it, and the kernel releases its hold on the driver extension. */
+static int cmd_eject(const char *sock, int argc, char **argv) {
+  double timeout = 0; /* 0: wait as long as it takes */
+  for (int i = 0; i < argc; i++) {
+    if (!strcmp(argv[i], "--timeout") && i + 1 < argc) timeout = atof(argv[++i]);
+    else { fprintf(stderr, "usage: rawgpu eject [--timeout SECONDS]\n"); return -EINVAL; }
+  }
+  char buf[1024];
+  const char *path = rg_tinygpu_sock_path(sock, buf, sizeof buf);
+  rg_dev d;
+  int pid, other, nothers, r;
+  double t0 = now_us(), next_note = 60;
+  bool waiting = false;
+  for (;;) {
+    nothers = tinygpu_processes(path, &pid, &other);
+    if (!pid) {
+      struct stat st;
+      if (!lstat(path, &st) && S_ISSOCK(st.st_mode)) unlink(path); /* stale: nothing serves it */
+      printf("No TinyGPU server is running for rawgpu.\n");
+      if (nothers) return not_safe_others(nothers, other);
+      printf("Nothing has the card. Safe to unplug.\n");
+      return 0;
+    }
+    int clients = server_clients(pid);
+    if (clients == 0) {
+      r = rg_attach_tinygpu(&d, path, NULL); /* if another client got in first, this waits for it */
+      if (r != -ECONNREFUSED) break;
+    }
+    double waited = (now_us() - t0) / 1e6;
+    if (!waiting) {
+      printf("Another program is using the card (TinyGPU server %d is busy). Waiting for it to finish;\n"
+             "Ctrl-C stops waiting.\n", pid);
+      waiting = true;
+    } else if (waited >= next_note) {
+      printf("  still waiting after %.0f min\n", waited / 60);
+      next_note += 60;
+    }
+    fflush(stdout);
+    if (timeout > 0 && waited >= timeout) {
+      printf("Gave up after %.0f s. The card is still in use: NOT safe to unplug.\n", waited);
+      return -EBUSY;
+    }
+    sleep(5);
+  }
+  if (r) { fprintf(stderr, "rawgpu: could not attach to TinyGPU server %d at %s (%d)\n", pid, path, r); return r; }
+  if (waiting) printf("The card is free (waited %.0f s).\n", (now_us() - t0) / 1e6);
+  printf("TinyGPU server: pid %d\n", pid);
+
+  if (!(r = rg_pci_identify(&d))) {
+    rg_ident id;
+    rg_identify_family(&d, &id);
+    if (id.backend && id.backend->quiesce) r = id.backend->quiesce(&d, &id);
+  } else {
+    printf("card:          no answer to config reads, so nothing on it is running\n");
+    r = 0;
+  }
+  rg_close(&d);
+  if (r) {
+    fprintf(stderr, "rawgpu: stopping the card's engines failed (%d). The server is left running: NOT safe to unplug.\n", r);
+    return r;
+  }
+  nanosleep(&(struct timespec){0, 300 * 1000 * 1000}, NULL); /* let the server finish its cleanup */
+
+  kill(pid, SIGTERM);
+  if (!process_gone(pid, 5)) {
+    kill(pid, SIGKILL);
+    if (!process_gone(pid, 3)) {
+      fprintf(stderr, "rawgpu: TinyGPU server %d did not exit. NOT safe to unplug.\n", pid);
+      return -EBUSY;
+    }
+  }
+  struct stat st;
+  if (!lstat(path, &st) && S_ISSOCK(st.st_mode)) unlink(path); /* it does not remove its socket on a signal */
+  printf("TinyGPU server: stopped\n");
+  if (nothers) return not_safe_others(nothers, other);
+  printf("\nSafe to unplug. The next rawgpu command starts a new server.\n");
+  return 0;
+}
+
 int main(int argc, char **argv) {
   const char *sock = NULL;
   int i = 1;
@@ -155,6 +343,8 @@ int main(int argc, char **argv) {
     amd_program_free(&p);
     return 0;
   }
+
+  if (!strcmp(cmd, "eject")) return cmd_eject(sock, argc - i, argv + i) ? 1 : 0; /* must not start a server */
 
   rg_dev d;
   int r = rg_open_tinygpu(&d, sock);

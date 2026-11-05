@@ -72,6 +72,7 @@ typedef struct {
   uint64_t vram_bytes, vram_free_bytes, vram_largest_free;
   int engine_mhz, memory_mhz; /* as the SMC reports them now; -1 if unknown */
   int temperature_c;
+  int fan_percent;           /* fan PWM duty, 0-100; -1 if unknown (no DPM, so no fan control) */
 } rawgpu_info;
 int rawgpu_get_info(rawgpu *g, rawgpu_info *info);
 

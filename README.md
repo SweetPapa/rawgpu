@@ -161,6 +161,14 @@ Driver Extensions → TinyGPU. Check that it bound with
 | `rawgpu kernel-info FILE` | A code object's kernels, resources and arguments | None (no GPU needed) |
 | `rawgpu soft-reset` | amdgpu's SDMA/MC soft reset for blocks that report busy | **Writes**; see the recovery notes in the roadmap |
 | `rawgpu reset`, `rawgpu asic-reset` | PCIe reset / amdgpu's PCI-config reset | **Writes**; neither had any effect on this card |
+| `rawgpu eject [--timeout S]` | Waits for the program using the card to finish, stops the compute queue and SDMA, closes the card and stops the TinyGPU server, then says when it's safe to unplug | **Writes**: retires the compute queue and halts SDMA (no-ops on an idle card) |
+
+**Before unplugging the enclosure, run `rawgpu eject`.** It waits while another
+program has the card, without disturbing it: the server takes one client at a
+time, so `eject` checks the server's sockets rather than connecting. Then it
+makes sure nothing on the card still reads or writes host memory, and stops
+the server. Unplugging while the server held a wedged card once left macOS
+stuck until a restart.
 
 Nothing touches the VRAM window until the card is posted. `post` refuses to
 re-run on a posted card unless you pass `--force`. If the card stops answering

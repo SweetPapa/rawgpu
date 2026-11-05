@@ -55,7 +55,8 @@ class _Info(ctypes.Structure):
                 ("wavefront_size", ctypes.c_uint), ("max_workgroup_size", ctypes.c_uint),
                 ("local_mem_bytes", ctypes.c_uint), ("vram_bytes", ctypes.c_uint64),
                 ("vram_free_bytes", ctypes.c_uint64), ("vram_largest_free", ctypes.c_uint64),
-                ("engine_mhz", ctypes.c_int), ("memory_mhz", ctypes.c_int), ("temperature_c", ctypes.c_int)]
+                ("engine_mhz", ctypes.c_int), ("memory_mhz", ctypes.c_int), ("temperature_c", ctypes.c_int),
+                ("fan_percent", ctypes.c_int)]
 
 
 class _ArgInfo(ctypes.Structure):

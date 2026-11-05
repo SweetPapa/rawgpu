@@ -187,6 +187,8 @@ class EmbeddingGemma2:
         """ids [B, T] int, lens [B]: queue the forward pass; returns the event of the last launch.
         tap(name, buffer, rows, cols, pitch), if given, is called at each step (for checking against the
         reference): the step's result is rows x cols, rows pitch floats apart."""
+        import time
+        t_prep = time.perf_counter()
         tap = tap or (lambda *a: None)
         k, D, H, P = self.k, self.D, self.H, self.P
         B = ids.shape[0]
@@ -196,6 +198,7 @@ class EmbeddingGemma2:
         x[:, :D] *= self.embed_scale
         self.x.write(x)
         self.lens.write(np.asarray(lens, np.uint32))
+        self.prep_s = time.perf_counter() - t_prep  # host work: the embedding rows, gathered and uploaded
         tap("embed", self.x, N, D, self.xp)
         # per-layer embeddings: rmsnorm((x @ W_ple^T) * D^-0.5) over each layer's P-wide slice
         self._linear(self.x, self.xp, self.w_ple, self.ple, self.L * P, N, alpha=D ** -0.5)
@@ -265,11 +268,18 @@ class EmbeddingGemma2:
         prompt text itself. `dim` 512/256/128 truncates (Matryoshka) and renormalizes."""
         if isinstance(texts, str):
             texts = [texts]
-        seqs = self.tokenize(texts, prompt)
+        return self.encode_tokens(self.tokenize(texts, prompt), dim, return_stats)
+
+    def encode_tokens(self, seqs, dim=None, return_stats=False):
+        """encode() for texts already tokenized by tokenize(). The stats (return_stats) split the time:
+        host_s batching and uploading the embedding rows, gpu_s launching (which waits whenever the
+        command ring is full) and waiting for the results."""
+        import time
         order = sorted(range(len(seqs)), key=lambda i: -len(seqs[i]))  # similar lengths batch together
         out = np.zeros((len(seqs), self.E), np.float32)
-        pos, tokens, padded, batches = 0, 0, 0, 0
+        pos, tokens, padded, batches, host_s, gpu_s = 0, 0, 0, 0, 0.0, 0.0
         while pos < len(order):
+            t0 = time.perf_counter()
             T = len(seqs[order[pos]])
             T = (T + 7) // 8 * 8
             cap = min(self.max_tokens // T, self.scores_bytes // (4 * self.H * T * (T + PAD)), self.max_batch)
@@ -279,8 +289,12 @@ class EmbeddingGemma2:
             for r, i in enumerate(idx):
                 ids[r, :len(seqs[i])] = seqs[i]
                 lens.append(len(seqs[i]))
+            t1 = time.perf_counter()
             self._forward(ids, lens, T)
             out[idx] = self.out.numpy()[:len(idx)]  # waits for the batch
+            t2 = time.perf_counter()
+            host_s += t1 - t0 + self.prep_s
+            gpu_s += t2 - t1 - self.prep_s
             tokens += sum(lens)
             padded += len(idx) * T
             batches += 1
@@ -289,5 +303,5 @@ class EmbeddingGemma2:
             out = out[:, :dim]
         out /= np.maximum(np.linalg.norm(out, axis=1, keepdims=True), 1e-12)
         if return_stats:
-            return out, dict(tokens=tokens, padded_tokens=padded, batches=batches)
+            return out, dict(tokens=tokens, padded_tokens=padded, batches=batches, host_s=host_s, gpu_s=gpu_s)
         return out

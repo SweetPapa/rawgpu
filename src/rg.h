@@ -57,6 +57,13 @@ struct rg_dev {
 /* ---- transport ---- */
 int rg_open_tinygpu(rg_dev *d, const char *sock_path); /* NULL = default path */
 void rg_close(rg_dev *d);
+/* The server's socket path: sock_path, else $RAWGPU_TINYGPU_SOCK, else $TMPDIR/rawgpu-tinygpu.sock. */
+const char *rg_tinygpu_sock_path(const char *sock_path, char *buf, size_t n);
+/* Connect to a TinyGPU server that is already running, without starting one. If another client has the
+ * card, this waits until it leaves. Returns 0 (and the server's pid); -ENOENT if there is no socket;
+ * -ECONNREFUSED if connecting was refused (a stale socket, or a busy server's backlog is full); -EIO if
+ * the server closed the connection. */
+int rg_attach_tinygpu(rg_dev *d, const char *sock_path, int *server_pid);
 
 static inline int rg_cfg_read(rg_dev *d, uint32_t off, uint32_t size, uint32_t *v) { return d->ops->cfg_read(d, off, size, v); }
 static inline int rg_cfg_write(rg_dev *d, uint32_t off, uint32_t size, uint32_t v) { return d->ops->cfg_write(d, off, size, v); }
@@ -134,6 +141,10 @@ struct rg_backend {
   uint32_t safe_reg;                /* byte offset of a side-effect-free register for latency tests */
   int (*probe)(rg_dev *, const rg_ident *);  /* read-only status report to stdout */
   int (*vbios_read)(rg_dev *, uint8_t **buf, size_t *len); /* caller frees *buf */
+  /* Before the card is let go (rawgpu eject): wait for the engines to go idle and stop any that a
+   * process left running, so nothing on the card reads or writes host memory afterwards. Prints what
+   * it did. */
+  int (*quiesce)(rg_dev *, const rg_ident *);
   const rg_cmd *cmds;               /* terminated by an entry with name NULL */
 };
 

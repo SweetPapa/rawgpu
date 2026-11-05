@@ -788,6 +788,48 @@ int vi_cmd_gfx_reset(rg_dev *d, const rg_ident *id, int argc, char **argv) {
   return v.err;
 }
 
+/* ---- rawgpu eject ---- */
+
+/* The backend's quiesce(): let running work finish, then retire the compute queue and halt the SDMA
+ * engines. rawgpu_close() does the same, but a process killed before it leaves them running and pointed
+ * at host memory that goes away with the TinyGPU server. On an idle card both are no-ops, and the next
+ * rawgpu_open() starts them again. */
+int vi_quiesce(rg_dev *d, const rg_ident *id) {
+  (void)id;
+  vi_dev v;
+  int r = vi_open(&v, d);
+  if (r) return r;
+  uint32_t grbm = vi_rreg(&v, mmGRBM_STATUS);
+  if (v.err || grbm == 0xffffffffu) {
+    printf("card:          not answering register reads, so nothing on it is running\n");
+    return 0;
+  }
+  if (REG_GET_FIELD(grbm, GRBM_STATUS, GUI_ACTIVE)) {
+    printf("GPU:           busy; waiting up to 30 s for its work to finish\n");
+    if (vi_wait(&v, mmGRBM_STATUS, GRBM_STATUS__GUI_ACTIVE_MASK, 0, 30u * 1000 * 1000) == -ETIMEDOUT)
+      printf("GPU:           still busy after 30 s; stopping its queue anyway\n");
+  }
+  vi_srbm_select(&v, 1, 0, 0, 0); /* ME1 pipe 0 queue 0: the queue rawgpu uses */
+  bool active = REG_GET_FIELD(vi_rreg(&v, mmCP_HQD_ACTIVE), CP_HQD_ACTIVE, ACTIVE);
+  int dq = hqd_dequeue(&v);
+  vi_srbm_select(&v, 0, 0, 0, 0);
+  printf("compute queue: %s\n", !active ? "inactive" : dq ? "did not drain (left as it was)" : "drained and retired");
+  static const uint32_t f32[2] = {mmSDMA0_F32_CNTL, mmSDMA1_F32_CNTL};
+  for (int me = 0; me < 2; me++) {
+    bool running = !REG_GET_FIELD(vi_rreg(&v, f32[me]), SDMA0_F32_CNTL, HALT);
+    if (running) {
+      if (me == 0) vi_wait(&v, mmSDMA0_STATUS_REG, SDMA0_STATUS_REG__IDLE_MASK, SDMA0_STATUS_REG__IDLE_MASK, 1000000);
+      vi_sdma_stop(&v, me);
+    }
+    printf("SDMA%d:         %s\n", me, running ? "stopped" : "halted");
+  }
+  int fan = vi_fan_percent(&v);
+  printf("GPU:           GRBM_STATUS 0x%08x, %d C", vi_rreg(&v, mmGRBM_STATUS), vi_temp_c(&v));
+  if (fan >= 0) printf(", fan %d%%", fan);
+  printf("\n");
+  return v.err;
+}
+
 /* ---- rawgpu waves ---- */
 
 /* gfx_v8_0.c wave_read_ind(): the SQ's per-wave registers through its index window */

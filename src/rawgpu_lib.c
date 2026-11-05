@@ -173,6 +173,7 @@ int rawgpu_get_info(rawgpu *g, rawgpu_info *info) {
   if (!vi_smu_clocks(&g->c.v, &sclk, &mclk)) { info->engine_mhz = (int)sclk; info->memory_mhz = (int)mclk; }
   else info->engine_mhz = info->memory_mhz = -1;
   info->temperature_c = vi_temp_c(&g->c.v);
+  info->fan_percent = vi_fan_percent(&g->c.v);
   return g->c.v.err ? fail(g, g->c.v.err, "register access failed") : 0;
 }
 

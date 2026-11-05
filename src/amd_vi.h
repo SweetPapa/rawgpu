@@ -106,6 +106,7 @@ void vi_ucode_free(vi_ucode_set *u);
 bool vi_smc_running(vi_dev *v);                       /* smu7_is_smc_ram_running() */
 int vi_smu_ucode_status(vi_dev *v, uint32_t *status); /* UcodeLoadStatus; -ENODEV if the SMC firmware is not up */
 int vi_temp_c(vi_dev *v);                             /* GPU temperature in degrees C */
+int vi_fan_percent(vi_dev *v);                        /* fan PWM duty, 0-100; -1 if not under SMC control */
 int vi_smu_clocks(vi_dev *v, uint32_t *sclk_mhz, uint32_t *mclk_mhz); /* as the SMC reports them */
 void vi_smu_report(vi_dev *v);
 const char *vi_smc_fw_name(const rg_dev *d, bool hard_key); /* the image amdgpu would load */

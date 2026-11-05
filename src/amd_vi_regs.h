@@ -205,6 +205,18 @@
 #define CG_CLKPIN_CNTL_2__XO_IN_OSCIN_EN_MASK                0x4000
 #define CG_CLKPIN_CNTL_2__XO_IN_OSCIN_EN__SHIFT              0xe
 
+#define ixCG_FDO_CTRL1                                       0xc0300068  /* smu/smu_7_1_3 */
+#define CG_FDO_CTRL1__FDO_PWRDNB_MASK                        0x40000000
+#define CG_FDO_CTRL1__FDO_PWRDNB__SHIFT                      0x1e
+#define CG_FDO_CTRL1__FMAX_DUTY100_MASK                      0xff
+#define CG_FDO_CTRL1__FMAX_DUTY100__SHIFT                    0x0
+#define CG_FDO_CTRL1__FMIN_DUTY_MASK                         0xff00
+#define CG_FDO_CTRL1__FMIN_DUTY__SHIFT                       0x8
+#define CG_FDO_CTRL1__M_MASK                                 0xff0000
+#define CG_FDO_CTRL1__M__SHIFT                               0x10
+#define CG_FDO_CTRL1__RESERVED_MASK                          0x3f000000
+#define CG_FDO_CTRL1__RESERVED__SHIFT                        0x18
+
 #define ixCG_MULT_THERMAL_STATUS                             0xc0300014  /* smu/smu_7_1_3 */
 #define CG_MULT_THERMAL_STATUS__ASIC_MAX_TEMP_MASK           0x1ff
 #define CG_MULT_THERMAL_STATUS__ASIC_MAX_TEMP__SHIFT         0x0
@@ -322,6 +334,16 @@
 #define ixCG_SPLL_FUNC_CNTL_7                                0xc0500158  /* smu/smu_7_1_3 */
 #define CG_SPLL_FUNC_CNTL_7__SPLL_BW_CNTRL_MASK              0xfff
 #define CG_SPLL_FUNC_CNTL_7__SPLL_BW_CNTRL__SHIFT            0x0
+
+#define ixCG_THERMAL_STATUS                                  0xc0300008  /* smu/smu_7_1_3 */
+#define CG_THERMAL_STATUS__FDO_PWM_DUTY_MASK                 0x1fe00
+#define CG_THERMAL_STATUS__FDO_PWM_DUTY__SHIFT               0x9
+#define CG_THERMAL_STATUS__GEN_STATUS_MASK                   0x3c0000
+#define CG_THERMAL_STATUS__GEN_STATUS__SHIFT                 0x12
+#define CG_THERMAL_STATUS__SPARE_MASK                        0x1ff
+#define CG_THERMAL_STATUS__SPARE__SHIFT                      0x0
+#define CG_THERMAL_STATUS__THERM_ALERT_MASK                  0x20000
+#define CG_THERMAL_STATUS__THERM_ALERT__SHIFT                0x11
 
 #define mmCOMPUTE_DIM_X                                      0x2e01  /* gca/gfx_8_0 */
 #define COMPUTE_DIM_X__SIZE_MASK                             0xffffffff

@@ -545,6 +545,7 @@ int vi_cmd_didt(rg_dev *d, const rg_ident *id, int argc, char **argv);          
 int vi_cmd_waves(rg_dev *d, const rg_ident *id, int argc, char **argv);         /* amd_vi_gfx.c */
 int vi_cmd_kernel_test(rg_dev *d, const rg_ident *id, int argc, char **argv);   /* amd_vi_ktest.c */
 int vi_cmd_gfx_reset(rg_dev *d, const rg_ident *id, int argc, char **argv);     /* amd_vi_gfx.c */
+int vi_quiesce(rg_dev *d, const rg_ident *id);                                  /* amd_vi_gfx.c */
 
 static const rg_cmd vi_cmds[] = {
   {"status", "", "engine, VM and SMC state (read-only)", cmd_status},
@@ -587,5 +588,6 @@ const rg_backend rg_backend_amd_vi = {
   .safe_reg = mmBIOS_SCRATCH_0 * 4,
   .probe = vi_probe,
   .vbios_read = vi_vbios_read,
+  .quiesce = vi_quiesce,
   .cmds = vi_cmds,
 };

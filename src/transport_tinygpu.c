@@ -223,7 +223,9 @@ static int try_connect(const char *path) {
   struct sockaddr_un a = {.sun_family = AF_UNIX};
   strncpy(a.sun_path, path, sizeof a.sun_path - 1);
   if (connect(fd, (struct sockaddr *)&a, sizeof a) == 0) return fd;
+  int e = errno;
   close(fd);
+  errno = e;
   return -1;
 }
 
@@ -250,14 +252,34 @@ static int spawn_server(const char *sock_path) {
   return r;
 }
 
+const char *rg_tinygpu_sock_path(const char *sock_path, char *buf, size_t n) {
+  if (sock_path) return sock_path;
+  const char *env = getenv("RAWGPU_TINYGPU_SOCK");
+  if (env) return env;
+  const char *tmp = getenv("TMPDIR");
+  snprintf(buf, n, "%s/rawgpu-tinygpu.sock", tmp ? tmp : "/tmp");
+  return buf;
+}
+
+/* Take over a connected socket as the device's transport. */
+static int adopt(rg_dev *d, int fd) {
+  int bufsz = 8 << 20, one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsz, sizeof bufsz);
+  setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsz, sizeof bufsz);
+  setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one); /* a closed server is an error, not a signal */
+
+  tg_priv *p = calloc(1, sizeof *p);
+  if (!p) { close(fd); return -ENOMEM; }
+  p->fd = fd;
+  memset(d, 0, sizeof *d);
+  d->ops = &tg_ops;
+  d->priv = p;
+  return 0;
+}
+
 int rg_open_tinygpu(rg_dev *d, const char *sock_path) {
   char def[1024];
-  if (!sock_path) sock_path = getenv("RAWGPU_TINYGPU_SOCK");
-  if (!sock_path) {
-    const char *tmp = getenv("TMPDIR");
-    snprintf(def, sizeof def, "%s/rawgpu-tinygpu.sock", tmp ? tmp : "/tmp");
-    sock_path = def;
-  }
+  sock_path = rg_tinygpu_sock_path(sock_path, def, sizeof def);
   if (strlen(sock_path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
     fprintf(stderr, "rawgpu: socket path too long: %s\n", sock_path);
     return -ENAMETOOLONG;
@@ -277,18 +299,32 @@ int rg_open_tinygpu(rg_dev *d, const char *sock_path) {
     }
     if (fd < 0) { fprintf(stderr, "rawgpu: TinyGPU server did not come up at %s\n", sock_path); return -ETIMEDOUT; }
   }
+  return adopt(d, fd);
+}
 
-  int bufsz = 8 << 20;
-  setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsz, sizeof bufsz);
-  setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsz, sizeof bufsz);
-
-  tg_priv *p = calloc(1, sizeof *p);
-  if (!p) { close(fd); return -ENOMEM; }
-  p->fd = fd;
-  memset(d, 0, sizeof *d);
-  d->ops = &tg_ops;
-  d->priv = p;
-  return 0;
+/* A server with a client does not accept another connection until that client leaves: the connection
+ * waits in its backlog (of one; when that is full, connecting is refused). This asks for the vendor ID
+ * and waits for the answer, so it waits its turn. Don't give up on that wait: the server would read the
+ * request later and answer a closed socket, and the SIGPIPE ends it. */
+int rg_attach_tinygpu(rg_dev *d, const char *sock_path, int *server_pid) {
+  char def[1024];
+  sock_path = rg_tinygpu_sock_path(sock_path, def, sizeof def);
+  if (strlen(sock_path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) return -ENAMETOOLONG;
+  int fd = try_connect(sock_path);
+  if (fd < 0) return errno == ECONNREFUSED ? -ECONNREFUSED : -ENOENT;
+  pid_t pid = 0;
+  socklen_t len = sizeof pid;
+  if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &len)) pid = 0;
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+  tg_req rq = {.cmd = TG_CFG_READ, .arg0 = 0, .arg1 = 4};
+  tg_resp rs;
+  if (send_all(fd, &rq, sizeof rq) || recv_all(fd, &rs, sizeof rs) || rs.status) {
+    close(fd);
+    return -EIO;
+  }
+  if (server_pid) *server_pid = (int)pid;
+  return adopt(d, fd);
 }
 
 void rg_close(rg_dev *d) {

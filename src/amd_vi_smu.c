@@ -207,6 +207,14 @@ int vi_temp_c(vi_dev *v) {
   return t & 0x200 ? 255 : (int)(t & 0x1ff); /* upstream's "below the lowest usable value" check */
 }
 
+/* smu7_fan_ctrl_get_fan_speed_pwm() as a percentage of full duty; -1 if the fan controller is not set up */
+int vi_fan_percent(vi_dev *v) {
+  uint32_t duty100 = REG_GET_FIELD(vi_rsmc(v, ixCG_FDO_CTRL1), CG_FDO_CTRL1, FMAX_DUTY100);
+  uint32_t duty = REG_GET_FIELD(vi_rsmc(v, ixCG_THERMAL_STATUS), CG_THERMAL_STATUS, FDO_PWM_DUTY);
+  if (!duty100 || v->err) return -1;
+  return (int)(duty * 100 / duty100 > 100 ? 100 : duty * 100 / duty100);
+}
+
 static void print_ucode_bits(uint32_t s) {
   static const char *names[16] = {
     [1] = "SDMA0", [2] = "SDMA1", [3] = "CE", [4] = "PFP", [5] = "ME", [6] = "MEC",

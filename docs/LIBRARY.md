@@ -106,7 +106,9 @@ c = gpu.matmul(gpu.array(a), gpu.array(b))  # SGEMM on 2-D float32 arrays
   `__local` argument.
 - `gpu.sgemm(...)` takes the full BLAS form: alpha, beta, transposes and
   leading dimensions.
-- `gpu.info` reports the clocks, the temperature and free VRAM.
+- `gpu.info` reports the engine and memory clocks, the temperature, the fan's
+  PWM duty (`fan_percent`, -1 before `dpm-enable` puts the SMC in charge of
+  the fan) and free VRAM.
 - Failures raise `rawgpu.Error` with the library's message.
 
 `python/test_rawgpu.py` checks all of it on the card. It is also a good

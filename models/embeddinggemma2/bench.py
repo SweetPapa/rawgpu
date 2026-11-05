@@ -83,7 +83,7 @@ def run(device, args):
         Q, t_q = timed(lambda: enc(questions, "query"))
         L, t_l = timed(lambda: enc(longdocs, "document"))
         info = model.gpu.info
-        meta = {"engine_mhz": info["engine_mhz"], "temperature_c": info["temperature_c"]}
+        meta = {k: info[k] for k in ("engine_mhz", "memory_mhz", "temperature_c", "fan_percent")}
         ntok = lambda texts, p: sum(len(s) for s in model.tokenize(texts, p))
         meta["tokens"] = [ntok(paras, "document"), ntok(questions, "query"), ntok(longdocs, "document")]
     else:
@@ -138,7 +138,9 @@ def main():
                   f"{len(longdocs) / tl:6.1f}/s {tok[2] / tl / 1e3:5.1f}k tok/s   "
                   + " / ".join(f"{rc[k]:.3f}" for k in sorted(rc)), flush=True)
             if "engine_mhz" in meta:
-                print(f"{'':<24} (engine {meta['engine_mhz']} MHz, {meta['temperature_c']} C at the end)", flush=True)
+                fan = f", fan {meta['fan_percent']}%" if meta.get("fan_percent", -1) >= 0 else ""
+                print(f"{'':<24} (at the end: engine {meta['engine_mhz']} MHz, memory {meta['memory_mhz']} MHz, "
+                      f"{meta['temperature_c']} C{fan})", flush=True)
     if tokens:
         print(f"\ntokens: paragraphs {tokens[0]} (avg {tokens[0] / len(paras):.0f}), questions {tokens[1]} "
               f"(avg {tokens[1] / len(questions):.0f}), long documents {tokens[2]} (avg {tokens[2] / len(longdocs):.0f})")
