@@ -4,11 +4,29 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+
+/* set by the Makefile: this checkout's local/ folder; empty in release builds */
+#ifndef RAWGPU_DEFAULT_LOCAL
+#define RAWGPU_DEFAULT_LOCAL ""
+#endif
 
 static uint32_t le32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
 static uint16_t le16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
 
 uint32_t amd_fw_hdr32(const amd_fw *fw, size_t off) { return off + 4 <= fw->size ? le32(fw->data + off) : 0; }
+
+const char *rg_data_dir(void) {
+  static char dir[1024];
+  if (dir[0]) return dir;
+  const char *env = getenv("RAWGPU_HOME"), *home = getenv("HOME");
+  struct stat st;
+  if (env && *env) snprintf(dir, sizeof dir, "%s", env);
+  else if (RAWGPU_DEFAULT_LOCAL[0] && !stat(RAWGPU_DEFAULT_LOCAL, &st) && S_ISDIR(st.st_mode))
+    snprintf(dir, sizeof dir, "%s", RAWGPU_DEFAULT_LOCAL);
+  else snprintf(dir, sizeof dir, "%s/Library/Application Support/rawgpu", home ? home : "");
+  return dir;
+}
 
 static FILE *open_fw(const char *dir, const char *name, char *path, size_t n) {
   const char *fmt[] = {"%s/amdgpu/%s.bin", "%s/%s.bin"};
@@ -23,14 +41,19 @@ static FILE *open_fw(const char *dir, const char *name, char *path, size_t n) {
 int amd_fw_load(amd_fw *fw, const char *dir, const char *name) {
   memset(fw, 0, sizeof *fw);
   snprintf(fw->name, sizeof fw->name, "%s", name);
+  char def[1100];
   if (!dir) dir = getenv("RAWGPU_FIRMWARE");
-  if (!dir) dir = "local/firmware";
+  if (!dir) {
+    snprintf(def, sizeof def, "%s/firmware", rg_data_dir());
+    dir = def;
+  }
 
   char path[1024];
   FILE *f = open_fw(dir, name, path, sizeof path);
   if (!f) {
-    fprintf(stderr, "rawgpu: firmware %s.bin not found under %s. Run tools/fetch-firmware.sh,\n"
-                    "        or point RAWGPU_FIRMWARE at a linux-firmware checkout.\n", name, dir);
+    fprintf(stderr, "rawgpu: firmware %s.bin not found under %s. Run fetch-firmware.sh (tools/ in a\n"
+                    "        checkout, share/rawgpu/ in a release), or point RAWGPU_FIRMWARE at a linux-firmware\n"
+                    "        checkout. `rawgpu doctor` checks the setup.\n", name, dir);
     return -ENOENT;
   }
   fseek(f, 0, SEEK_END);

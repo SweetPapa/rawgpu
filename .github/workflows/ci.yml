@@ -1,0 +1,74 @@
+name: CI
+
+# Builds everything that can be built without the GPU: the CLI and library, the kernels, the example,
+# both apps, and syntax checks of the Python and shell. The hardware tests (python/test_rawgpu.py,
+# rawgpu kernel-test, compare.py) need the card and run by hand before a release (docs/RELEASING.md).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # macOS minutes cost 10x on a private repository, so while this one is private CI runs only when
+    # started by hand. On a public repository it runs on every push and pull request.
+    if: ${{ !github.event.repository.private || github.event_name == 'workflow_dispatch' }}
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: LLVM with the AMDGPU target (kernels)
+        run: brew install llvm
+
+      - uses: actions/cache@v4
+        with:
+          path: local/device-libs
+          key: device-libs-${{ hashFiles('tools/fetch-device-libs.sh') }}
+
+      - name: CLI, library, kernels, example
+        run: make -j"$(sysctl -n hw.ncpu)" all kernels examples
+
+      - name: Smoke test (no GPU)
+        run: |
+          ./build/rawgpu --version
+          ./build/rawgpu doctor
+          ./build/rawgpu kernel-info build/kernels/sgemm.o | head -20
+          ./build/rawgpu who
+
+      - name: A release build never looks in its build folder
+        run: |
+          make clean >/dev/null
+          make -j"$(sysctl -n hw.ncpu)" RELEASE=1 VERSION=ci all >/dev/null
+          ! strings build/rawgpu build/librawgpu.dylib | grep -F "$PWD"
+          make clean >/dev/null && make -j"$(sysctl -n hw.ncpu)" all >/dev/null
+
+      - name: Python and shell syntax
+        run: |
+          python3 -m py_compile python/rawgpu/__init__.py python/*.py demos/*.py tools/*.py models/embeddinggemma2/*.py
+          for f in tools/*.sh; do bash -n "$f"; done
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/target
+          key: cargo-${{ hashFiles('apps/Cargo.lock') }}
+
+      - name: Apps
+        run: |
+          mkdir -p apps/rawgpu-tray/binaries
+          cp build/rawgpu apps/rawgpu-tray/binaries/rawgpu-aarch64-apple-darwin
+          python3 tools/rust-licenses.py apps/rawgpu-tray > apps/rawgpu-tray/binaries/THIRD_PARTY_RUST.md
+          cd apps && cargo build --locked

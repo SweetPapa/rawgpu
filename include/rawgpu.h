@@ -62,6 +62,9 @@ void rawgpu_close(rawgpu *g);
 /* the last failure's message, "" if none; valid until the next call (g may be NULL after a failed open) */
 const char *rawgpu_error(const rawgpu *g);
 
+/* this build's version, e.g. "0.1.0" ("dev" outside a release) */
+const char *rawgpu_version(void);
+
 typedef struct {
   char name[64];             /* e.g. "AMD POLARIS10, PCI 1002:67df rev e1, board 148c:2391" */
   char arch[16];             /* "gfx803" */

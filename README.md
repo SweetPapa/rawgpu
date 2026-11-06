@@ -108,7 +108,59 @@ M4 Pro's own GPU (PyTorch MPS):
 
 See [models/embeddinggemma2/README.md](models/embeddinggemma2/README.md).
 
-## Quick start
+## Before you start
+
+> **rawgpu is experimental.** It writes to the GPU's registers, runs its
+> VBIOS, and turns on amdgpu's power management, which sets clocks, voltages
+> and the fan. It has been tested on one card, a PowerColor RX 590. A
+> mistake can hang the card until you power-cycle it, and once it left macOS
+> needing a restart. Use it at your own risk: the MIT license comes with no
+> warranty.
+>
+> rawgpu is not affiliated with AMD, Apple or tinygrad.
+
+**What you need:**
+- **Mac:** Apple Silicon with Thunderbolt or USB4. Tested on an M4 Pro with
+  macOS 15.5; older versions are untested.
+- **Enclosure:** a Thunderbolt eGPU enclosure, with an AMD Polaris card in it
+  (see *Swapping cards* below).
+- **Driver:** tinygrad's **TinyGPU**. `install-tinygpu.sh` downloads it,
+  checks its signature and notarization, and installs it. You approve it once
+  in System Settings.
+- **AMD's firmware:** `fetch-firmware.sh` downloads it from linux-firmware,
+  each file checked against a pinned sha256.
+- **To compile OpenCL kernels:** Homebrew LLVM (`brew install llvm`) and
+  AMD's device libraries (`fetch-device-libs.sh`).
+- **To build from source:** Xcode's command-line tools, plus Homebrew LLVM.
+  `make` compiles the built-in SGEMM kernel.
+
+`rawgpu doctor` checks all of this and says what to do about anything
+missing. It never touches the card.
+
+## Install a release
+
+The [releases](https://github.com/SweetPapa/rawgpu/releases) are signed and
+notarized:
+- **`rawgpu-app-<version>-macos-arm64.zip`:** the menu bar app (see
+  [apps/README.md](apps/README.md)), with the CLI inside it. Unzip it into
+  Applications and open it. It walks you through installing TinyGPU and
+  downloading the firmware, then shows the card's state and does the eject.
+- **`rawgpu-<version>-macos-arm64.tar.gz`:** the CLI, `librawgpu` (static
+  and dynamic), `rawgpu.h` and the Python binding:
+
+  ```sh
+  tar xzf rawgpu-*-macos-arm64.tar.gz && cd rawgpu-*/
+  share/rawgpu/install-tinygpu.sh   # then approve TinyGPU in System Settings
+  share/rawgpu/fetch-firmware.sh    # into ~/Library/Application Support/rawgpu
+  bin/rawgpu doctor
+  bin/rawgpu up                     # post, memory firmware, power management
+  PYTHONPATH=python python3 -c "import rawgpu; print(rawgpu.Device().info)"
+  ```
+
+A release keeps its firmware and device libraries in
+`~/Library/Application Support/rawgpu`, or in `$RAWGPU_HOME` if you set it.
+
+## Build from source
 
 ```sh
 tools/install-tinygpu.sh      # verified install; then approve it in System Settings
@@ -194,7 +246,9 @@ it lands:
 
 | Card | Today |
 |---|---|
-| Any Polaris: RX 460/470/480/550/560/570/580/590, Radeon Pro WX 2100–7100 | `amd-vi` backend. Same code path; the firmware file differs by chip |
+| RX 590 (Polaris 30) | **Tested**: everything in this README |
+| RX 470/480/570/580, Radeon Pro WX 7100 (Polaris 10/20) | Should work: the same chip to amdgpu (`CHIP_POLARIS10`) and the same code path. Their firmware is fetched. **Untested**: reports welcome |
+| RX 460/550/560, Radeon Pro WX 2100–5100 (Polaris 11/12) | `amd-vi` probe works. Bring-up needs their firmware, and the library's chip check lifted |
 | Tonga / Fiji (R9 285/380/Fury/Nano) | `amd-vi` probe works; bring-up not tested |
 | AMD RDNA3+ (RX 7000/9000), NVIDIA Ampere+ (RTX 30+) | Use tinygrad directly; it drives these over the same TinyGPU transport |
 | GCN1/2, Vega, RDNA1/2 | Transport and probe work; needs a backend |
@@ -246,4 +300,7 @@ client at a time, so rawgpu and tinygrad can't share the GPU at once.
 - **Credits.** TinyGPU and the server protocol are from
   [tinygrad](https://github.com/tinygrad/tinygrad) (MIT). Register definitions,
   ATOM layouts and the vendored ATOM interpreter are from Linux amdgpu (MIT).
-- **License.** TBD before this goes public. MIT would match both upstreams.
+- **License.** MIT (`LICENSE`). The code from Linux amdgpu, highlight.js and
+  the rest are listed in `THIRD_PARTY_NOTICES.md`, each under its own license.
+- **Releases** are built, signed and notarized by GitHub Actions from a
+  version tag ([docs/RELEASING.md](docs/RELEASING.md)).

@@ -16,8 +16,12 @@ typedef struct {
   uint32_t ucode_dw;
 } amd_fw;
 
+/* rawgpu's per-user data, firmware/ and device-libs/: $RAWGPU_HOME; else the local/ folder of the
+ * checkout this was built in, if it is there; else ~/Library/Application Support/rawgpu (a release). */
+const char *rg_data_dir(void);
+
 /* Finds <dir>/amdgpu/<name>.bin (or <dir>/<name>.bin). dir NULL = $RAWGPU_FIRMWARE,
- * then ./local/firmware. Checks the header against the file size. */
+ * then rg_data_dir()/firmware. Checks the header against the file size. */
 int amd_fw_load(amd_fw *fw, const char *dir, const char *name);
 void amd_fw_free(amd_fw *fw);
 uint32_t amd_fw_hdr32(const amd_fw *fw, size_t off); /* header dword at byte offset off */

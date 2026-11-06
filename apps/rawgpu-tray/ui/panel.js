@@ -59,6 +59,7 @@ let settingsOpen = false;
 function pill(s) {
   const done = s.eject.state === "done";
   const map = {
+    setup: ["warn", "Set up", I.warn], "no-card": ["", "No card"],
     idle: ["good", "Ready"], reading: ["", "Reading…"], busy: ["busy", "In use"], ejecting: ["busy", "Ejecting"],
     off: done ? ["good", "Safe to unplug", I.check] : ["", "Disconnected"],
     other: ["warn", "Not safe to unplug", I.warn], "not-posted": ["warn", "Needs bring-up", I.warn],
@@ -330,6 +331,10 @@ function renderActions(s) {
       primary = connect(true);
       sec.append(ejectBtn(false), details());
       break;
+    case "setup": case "no-card":
+      primary = act("Details", I.details, () => invoke("open_details"));
+      primary.classList.add("big");
+      break;
     case "other": case "cli-error":
       primary = act("Details", I.details, () => invoke("open_details"), { primary: true });
       break;
@@ -366,6 +371,46 @@ function renderFoot(s) {
   $("updated").textContent = t;
 }
 
+// ---------------------------------------------------------------- setup: TinyGPU, the card, firmware
+
+function renderSetup(s) {
+  const d = s.doctor;
+  const keys = ["tinygpu_installed", "tinygpu_enabled", "card_bound", "firmware_ok"];
+  const show = !!d && keys.some((k) => d[k] === false);
+  $("setup").hidden = !show;
+  if (!show) return;
+  const run = s.setup_running;
+  const rows = [
+    [d.tinygpu_installed, "TinyGPU driver", "tinygrad's signed driver, verified before it's installed",
+      run === "install-tinygpu" ? "spin" : ["Install", () => invoke("setup", { action: "install-tinygpu" })]],
+    [d.tinygpu_installed && d.tinygpu_enabled, "Driver approved", "System Settings › General › Login Items & Extensions › Driver Extensions",
+      d.tinygpu_installed ? ["Open Settings", () => invoke("setup", { action: "open-settings" })] : null],
+    [d.card_bound, "Card attached", "Plug in the enclosure with the card and switch it on", null],
+    [d.firmware_ok, "AMD firmware", "Needed to bring the card up; downloaded from linux-firmware and checked",
+      run === "fetch-firmware" ? "spin" : ["Download", () => invoke("setup", { action: "fetch-firmware" })]],
+  ];
+  const ol = $("checks");
+  ol.replaceChildren();
+  for (const [ok, title, hint, action] of rows) {
+    const li = h("li", ok ? "ok" : "");
+    const mark = h("span", "mark");
+    if (ok) mark.append(icon(I.check));
+    const text = h("span", "text");
+    text.append(document.createTextNode(title));
+    if (!ok) text.append(h("small", null, hint));
+    li.append(mark, text);
+    if (!ok && action === "spin") li.append(h("span", "spin"));
+    else if (!ok && action) {
+      const b = h("button", "btn", action[0]);
+      b.type = "button";
+      b.disabled = !!run;
+      b.onclick = action[1];
+      li.append(b);
+    }
+    ol.append(li);
+  }
+}
+
 // ---------------------------------------------------------------- render
 
 let fitH = 0;
@@ -383,6 +428,7 @@ function render(s) {
   $("sub").textContent = `AMD Polaris 10${v}`;
   pill(s);
   alertBox(s);
+  renderSetup(s);
   const main = ["idle", "reading", "busy", "not-posted", "not-answering"].includes(s.mode) && !s.up_running;
   $("main-view").hidden = !main;
   if (main) {

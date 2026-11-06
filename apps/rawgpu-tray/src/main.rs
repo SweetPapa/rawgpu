@@ -43,8 +43,19 @@ fn repo() -> PathBuf {
     Path::new(REPO).canonicalize().unwrap_or_else(|_| PathBuf::from(REPO))
 }
 
+/// The CLI: $RAWGPU_BIN; else the one bundled beside this app's executable (a release, and `make apps`);
+/// else the checkout's build/rawgpu.
 fn rawgpu_bin() -> PathBuf {
-    std::env::var_os("RAWGPU_BIN").map(PathBuf::from).unwrap_or_else(|| repo().join("build/rawgpu"))
+    if let Some(p) = std::env::var_os("RAWGPU_BIN") {
+        return PathBuf::from(p);
+    }
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+        let bundled = dir.join("rawgpu");
+        if bundled.is_file() {
+            return bundled;
+        }
+    }
+    repo().join("build/rawgpu")
 }
 
 fn home() -> PathBuf {
@@ -286,6 +297,8 @@ struct Snapshot {
     eject: EjectInfo,
     up_running: bool,
     up_step: String,
+    doctor: Option<Value>,
+    setup_running: String, // the setup action running: "", "install-tinygpu", "fetch-firmware"
     log: Vec<String>,
     rawgpu: String,
     history: Vec<Sample>,
@@ -389,6 +402,34 @@ fn derive(s: &mut Snapshot) {
         s.eject_enabled = true;
         s.up_enabled = false;
         return;
+    }
+    // setup comes first: without TinyGPU nothing else can work
+    if let Some(d) = &s.doctor {
+        let ok = |k: &str| d.get(k).and_then(Value::as_bool).unwrap_or(true);
+        if !ok("tinygpu_installed") || !ok("tinygpu_enabled") {
+            s.level = "warn".into();
+            s.mode = "setup".into();
+            s.headline = "rawgpu: finish setting up".into();
+            s.detail = if !ok("tinygpu_installed") {
+                "Install the TinyGPU driver".into()
+            } else {
+                "Approve the TinyGPU driver in System Settings".into()
+            };
+            s.user = String::new();
+            s.eject_enabled = false;
+            s.up_enabled = false;
+            return;
+        }
+        if !ok("card_bound") && server == 0 && s.eject.state != "done" {
+            s.level = "off".into();
+            s.mode = "no-card".into();
+            s.headline = "RX 590: no card attached".into();
+            s.detail = "Plug in the enclosure and switch it on".into();
+            s.user = String::new();
+            s.eject_enabled = false;
+            s.up_enabled = false;
+            return;
+        }
     }
     if let Some(e) = &s.who_error {
         s.level = "warn".into();
@@ -707,6 +748,74 @@ fn poll_once(app: &AppHandle, sh: &Sh) {
     watch(app, sh);
 }
 
+/// `rawgpu doctor --json`: what is installed and attached. Looks only; cheap enough to run every minute.
+fn run_doctor(app: &AppHandle, sh: &Sh) {
+    let d = run_json(&["doctor", "--json"]).ok();
+    sh.snap.lock().unwrap().doctor = d;
+    refresh(app, sh);
+}
+
+/// A setup step: install TinyGPU, or download the AMD firmware, with the scripts that come with the CLI.
+fn setup_action(app: &AppHandle, sh: &Sh, action: &str) -> Result<(), String> {
+    if action == "open-settings" {
+        let _ = Command::new("open").arg("x-apple.systempreferences:com.apple.LoginItems-Settings.extension").status();
+        return Ok(());
+    }
+    let script = match action {
+        "install-tinygpu" => "install-tinygpu.sh",
+        "fetch-firmware" => "fetch-firmware.sh",
+        _ => return Err(format!("unknown setup step {action}")),
+    };
+    let dir = {
+        let s = sh.snap.lock().unwrap();
+        if !s.setup_running.is_empty() {
+            return Err("another setup step is running".into());
+        }
+        s.doctor.as_ref().and_then(|d| d.get("scripts")).and_then(Value::as_str).unwrap_or("").to_string()
+    };
+    let path = Path::new(&dir).join(script);
+    if !path.is_file() {
+        return Err(format!("{} is missing", path.display()));
+    }
+    {
+        let mut s = sh.snap.lock().unwrap();
+        s.setup_running = action.to_string();
+        log_line(&mut s, format!("$ {}", path.display()));
+    }
+    refresh(app, sh);
+    let (app, sh) = (app.clone(), sh.clone());
+    std::thread::spawn(move || {
+        let out = Command::new(if script.ends_with(".sh") && script.starts_with("install") { "/bin/bash" } else { "/bin/sh" })
+            .arg(&path)
+            .stdin(Stdio::null())
+            .output();
+        let ok = {
+            let mut s = sh.snap.lock().unwrap();
+            let ok = match out {
+                Ok(o) => {
+                    for l in String::from_utf8_lossy(&o.stdout).lines().chain(String::from_utf8_lossy(&o.stderr).lines()) {
+                        log_line(&mut s, l.to_string());
+                    }
+                    o.status.success()
+                }
+                Err(e) => {
+                    log_line(&mut s, format!("could not run {}: {e}", path.display()));
+                    false
+                }
+            };
+            let end = format!("[{} {}]", s.setup_running, if ok { "done" } else { "failed" });
+            log_line(&mut s, end);
+            s.setup_running.clear();
+            ok
+        };
+        if !ok {
+            notify(&app, "rawgpu setup", "A setup step failed. Open Details from the menu bar for its output.");
+        }
+        run_doctor(&app, &sh);
+    });
+    Ok(())
+}
+
 fn start_eject(app: &AppHandle, sh: &Sh) {
     {
         let mut s = sh.snap.lock().unwrap();
@@ -940,6 +1049,7 @@ fn toggle_panel(app: &AppHandle, rect: Option<tauri::Rect>) {
     std::thread::spawn(move || {
         *sh2.last_status.lock().unwrap() = None; // fresh readings for the open panel
         poll_once(&app2, &sh2);
+        run_doctor(&app2, &sh2);
     });
 }
 
@@ -1043,6 +1153,11 @@ async fn full_status() -> Result<String, String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn setup(app: AppHandle, sh: State<'_, Sh>, action: String) -> Result<(), String> {
+    setup_action(&app, &sh, &action)
 }
 
 #[tauri::command]
@@ -1182,6 +1297,18 @@ fn main() {
                 }
             }
 
+            let (dh, dsh) = (app.handle().clone(), sh.clone());
+            std::thread::spawn(move || loop {
+                // the setup checks: every 20 s until everything is in place, then every 2 minutes
+                run_doctor(&dh, &dsh);
+                let ready = dsh.snap.lock().unwrap().doctor.as_ref().is_some_and(|d| {
+                    ["tinygpu_installed", "tinygpu_enabled", "card_bound", "firmware_ok"]
+                        .iter()
+                        .all(|k| d.get(*k).and_then(Value::as_bool).unwrap_or(false))
+                });
+                std::thread::sleep(Duration::from_secs(if ready { 120 } else { 20 }));
+            });
+
             let handle = app.handle().clone();
             std::thread::spawn(move || loop {
                 poll_once(&handle, &sh);
@@ -1213,6 +1340,7 @@ fn main() {
             refresh_now,
             dismiss,
             set_setting,
+            setup,
             full_status,
             fit_panel,
             close_panel,

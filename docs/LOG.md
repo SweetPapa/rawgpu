@@ -2,6 +2,56 @@
 
 Dated, factual notes from real hardware. Newest first.
 
+## 2026-11-05: ready to publish: MIT, signed and notarized releases, `rawgpu doctor`
+
+**The audit before going public:**
+- **Clean:** no secrets in the tree or history, no firmware, VBIOS or model
+  files ever committed, no personal paths, and no private project names.
+- **Vendored code:** all of it is AMD's MIT code from Linux amdgpu, with
+  notices kept. The generated register headers and the shims had no notice;
+  `THIRD_PARTY_NOTICES.md` now covers them, along with tinygrad, highlight.js
+  and the downloads.
+- **Licenses and authorship:**
+  - rawgpu is now MIT (`LICENSE`).
+  - The apps' 239 Rust crates are MIT, Apache-2.0, BSD-like, Unicode and 5
+    MPL-2.0, none GPL. `tools/rust-licenses.py` lists them into the app.
+  - The commits' author email was moved off a work address.
+- **Built-in paths:** release binaries recorded the checkout's paths for
+  firmware and device libraries. `make RELEASE=1` leaves them out.
+  `rg_data_dir()` is `$RAWGPU_HOME`, else the checkout's `local/` (a source
+  build), else `~/Library/Application Support/rawgpu`, and the fetch scripts
+  use the same rule.
+- **Firmware for other cards:** `fetch-firmware.sh` now also fetches the
+  Polaris 10 and 20 SMC and MC images (`polaris10_smc`, `_k_smc`, `_smc_sk`,
+  `_mc`), checked against the same commit on gitlab.com and kernel.org, so
+  RX 470/480/570/580 owners can try it. The README's card table now says
+  what has been tested: the RX 590.
+- **Device libraries** are now fetched over HTTPS (they were pinned by
+  sha256 already).
+
+**New:**
+- **`rawgpu doctor [--json]`** checks the Mac, TinyGPU (installed, approved
+  in `systemextensionsctl`, bound in `ioreg`), the firmware, the device
+  libraries and clang. It says how to fix each gap, and never touches the
+  card. `rawgpu --version` and `rawgpu_version()` report the version.
+- **The menu bar app carries the CLI and the setup scripts.** Until setup is
+  complete, its panel shows a checklist with Install, Open Settings and
+  Download buttons.
+- **`tools/package-release.sh`** builds a release from a clean copy of the
+  tracked files: a CLI/library/Python tarball and the app, signed with the
+  hardened runtime and notarized. `.github/workflows/release.yml` runs it on
+  a `v*` tag, into a draft release. It only signs as team 6Y5SZ2K5XY; the
+  keychain here also holds Stanford Developer IDs, which must never sign
+  this.
+- **`.github/workflows/ci.yml`** builds everything without a GPU and checks
+  that a release binary has no build path in it. It is manual while the
+  repository is private, since macOS minutes cost 10x there.
+- **Tested:**
+  - an ad-hoc local package: release CLI paths, the bundled CLI finding its
+    scripts, no build paths in `strings`, firmware fetched into a scratch
+    home;
+  - `test_rawgpu.py` and `kernel-test` on the card.
+
 ## 2026-11-05: the apps, second pass
 
 **The menu bar app:**

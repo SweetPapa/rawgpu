@@ -10,7 +10,15 @@ HDR := src/rg.h src/amd_ids.inc src/atom/rg_atom.h src/amd_fw.h src/amd_vi.h src
 OBJ_DIR := build/obj
 LIB_OBJ := $(addprefix $(OBJ_DIR)/,$(notdir $(LIB_SRC:.c=.o))) $(OBJ_DIR)/embedded.o
 # where the library finds the kernel compiler and this checkout's device libraries and firmware by default
-LIB_DEFS = -DRAWGPU_DEFAULT_CLANG='"$(AMDGPU_CLANG)"' -DRAWGPU_DEFAULT_LOCAL='"$(CURDIR)/local"'
+# A release build (make RELEASE=1) never looks in the folder it was built in: data comes from
+# $RAWGPU_HOME or ~/Library/Application Support/rawgpu (see rg_data_dir() in src/amd_fw.c).
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo dev)
+ifeq ($(RELEASE),1)
+DEFAULT_LOCAL :=
+else
+DEFAULT_LOCAL := $(CURDIR)/local
+endif
+LIB_DEFS = -DRAWGPU_DEFAULT_CLANG='"$(AMDGPU_CLANG)"' -DRAWGPU_DEFAULT_LOCAL='"$(DEFAULT_LOCAL)"' -DRAWGPU_VERSION='"$(VERSION)"'
 
 all: build/rawgpu build/librawgpu.a build/librawgpu.dylib
 
@@ -112,14 +120,23 @@ build/examples/%: examples/%.c build/librawgpu.a include/rawgpu.h
 TAURI := npx -y @tauri-apps/cli@2.12.4
 APP_DIR := apps/target/release/bundle/macos
 apps: build/rawgpu
+	mkdir -p apps/rawgpu-tray/binaries
+	cp build/rawgpu apps/rawgpu-tray/binaries/rawgpu-aarch64-apple-darwin
+	python3 tools/rust-licenses.py apps/rawgpu-tray > apps/rawgpu-tray/binaries/THIRD_PARTY_RUST.md
 	cd apps/rawgpu-tray && $(TAURI) build --bundles app
 	cd apps/code-search && $(TAURI) build --bundles app
+
+# a signed, notarized release into dist/ (docs/RELEASING.md): make release V=0.1.0
+release:
+	tools/package-release.sh $(V)
 
 install-apps: apps
 	ditto "$(APP_DIR)/rawgpu.app" "$(HOME)/Applications/rawgpu.app"
 	ditto "$(APP_DIR)/Code Search.app" "$(HOME)/Applications/Code Search.app"
+	@# unsigned Tauri bundles carry only the linker's signature, which leaves out their resources
+	codesign --force --deep --sign - "$(HOME)/Applications/rawgpu.app" "$(HOME)/Applications/Code Search.app"
 
 clean:
 	rm -rf build
 
-.PHONY: all ids regs atom-names kernels examples apps install-apps clean
+.PHONY: all ids regs atom-names kernels examples apps install-apps release clean

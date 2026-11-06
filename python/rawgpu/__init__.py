@@ -13,7 +13,8 @@
 A thin ctypes layer over librawgpu (include/rawgpu.h); its rules hold here:
 launches are asynchronous and in order, transfers wait for them, errors raise
 rawgpu.Error with the library's message. Set RAWGPU_LIB to use a specific
-librawgpu.dylib; by default the one in this checkout's build/ directory.
+librawgpu.dylib; by default the one in this checkout's build/ directory, or in a
+release, the one in lib/ beside python/.
 """
 import atexit
 import ctypes
@@ -40,7 +41,8 @@ def _find_lib():
     if env:
         return env
     here = os.path.dirname(os.path.abspath(__file__))
-    for cand in (os.path.join(here, "..", "..", "build", "librawgpu.dylib"),
+    for cand in (os.path.join(here, "..", "..", "build", "librawgpu.dylib"),  # a checkout
+                 os.path.join(here, "..", "..", "lib", "librawgpu.dylib"),    # a release: python/ beside lib/
                  os.path.join(here, "librawgpu.dylib")):
         if os.path.exists(cand):
             return os.path.normpath(cand)

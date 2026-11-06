@@ -1,0 +1,129 @@
+name: Release
+
+# A version tag (v0.1.0) builds, signs, notarizes and uploads a draft GitHub release:
+#   rawgpu-<v>-macos-arm64.tar.gz    the CLI, librawgpu, rawgpu.h and the Python binding
+#   rawgpu-app-<v>-macos-arm64.zip   the menu bar app, with the CLI inside
+#   SHA256SUMS
+# The draft is published by hand, after a look. Run it from the Actions tab to build and notarize
+# without a release (a dry run): the files are kept as the run's artifacts.
+#
+# It runs tools/package-release.sh, the same script a local release runs (docs/RELEASING.md).
+#
+# Secrets (set by FloppyJam's scripts/setup-ci.sh --repo SweetPapa/rawgpu --apple --notary):
+#   APPLE_CERT_P12, APPLE_CERT_PASSWORD   Developer ID Application certificate (.p12, base64) and password
+#   APPLE_TEAM_ID                         must be 6Y5SZ2K5XY (Forrester Terry); anything else stops the run
+#   ASC_KEY_P8, ASC_KEY_ID, ASC_ISSUER_ID App Store Connect API key, for notarization
+# Without them it still builds, ad-hoc signed and not notarized, and says so.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version, without the v (a dry run unless "publish" is ticked)
+        required: true
+        default: 0.0.0-test
+      publish:
+        description: Also create a draft release for v<version>
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Version
+        id: v
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then V="${GITHUB_REF_NAME#v}"; else V="${{ inputs.version }}"; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Version $V"
+
+      - name: Tools
+        run: brew install llvm
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Signing certificate
+        env:
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "${APPLE_CERT_P12:-}" ]; then
+            echo "::warning::no APPLE_CERT_P12 secret: the build is ad-hoc signed and not notarized"
+            exit 0
+          fi
+          [ "$APPLE_TEAM_ID" = "6Y5SZ2K5XY" ] || { echo "::error::APPLE_TEAM_ID is not 6Y5SZ2K5XY"; exit 1; }
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          PASS="$(openssl rand -hex 24)"
+          security create-keychain -p "$PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$PASS" "$KEYCHAIN"
+          printf '%s' "$APPLE_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$PASS" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          ID="$(security find-identity -v -p codesigning "$KEYCHAIN" | grep -o '"Developer ID Application: [^"]*(6Y5SZ2K5XY)"' | head -1 | tr -d '"')"
+          [ -n "$ID" ] || { echo "::error::no Developer ID Application identity for team 6Y5SZ2K5XY in the certificate"; exit 1; }
+          echo "Signing as $ID"
+          echo "SIGN_IDENTITY=$ID" >> "$GITHUB_ENV"
+
+      - name: Notarization key
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          if [ -z "${ASC_KEY_P8:-}" ]; then echo "::warning::no ASC_KEY_P8 secret: not notarized"; exit 0; fi
+          printf '%s' "$ASC_KEY_P8" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          { echo "ASC_KEY_PATH=$RUNNER_TEMP/AuthKey.p8"; echo "ASC_KEY_ID=$ASC_KEY_ID"; echo "ASC_ISSUER_ID=$ASC_ISSUER_ID"; } >> "$GITHUB_ENV"
+
+      - name: Build, sign, notarize
+        run: tools/package-release.sh "${{ steps.v.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rawgpu-${{ steps.v.outputs.version }}
+          path: dist/*
+
+      - name: Draft release
+        if: ${{ github.ref_type == 'tag' || inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="${{ steps.v.outputs.version }}"
+          PREV="$(git describe --abbrev=0 --tags "v$V^" 2>/dev/null || git rev-list --max-parents=0 HEAD | tail -1)"
+          {
+            echo "rawgpu $V for Apple Silicon Macs: AMD Polaris GPUs (tested on the RX 590) over Thunderbolt, from userspace."
+            echo
+            echo "**Experimental.** It writes to the GPU's registers and power management. Read the README first."
+            echo
+            echo "### Install"
+            echo "- **rawgpu-app** (menu bar): unzip into Applications and open it. It walks through installing"
+            echo "  tinygrad's TinyGPU driver and downloading AMD's firmware."
+            echo "- **rawgpu** (CLI, library, Python): unpack, then \`share/rawgpu/install-tinygpu.sh\`,"
+            echo "  \`share/rawgpu/fetch-firmware.sh\`, \`bin/rawgpu doctor\`, \`bin/rawgpu up\`."
+            echo "- Check the downloads against \`SHA256SUMS\`."
+            echo
+            echo "### Changes"
+            git log --no-merges --pretty='- %s' "$PREV..HEAD"
+          } > "$RUNNER_TEMP/notes.md"
+          PRE=""; case "$V" in *-*) PRE="--prerelease";; esac
+          gh release create "v$V" dist/* --draft $PRE --title "rawgpu $V" --notes-file "$RUNNER_TEMP/notes.md" --target "$GITHUB_SHA"
+
+      - name: Clean up the keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true

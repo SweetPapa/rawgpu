@@ -1,6 +1,7 @@
 /* The rawgpu library (include/rawgpu.h), over the amd-vi host API (amd_vi_ctx.h). */
 #include "rawgpu.h"
 
+#include "amd_fw.h"
 #include "amd_kernel.h"
 #include "amd_vi_ctx.h"
 #include "rg.h"
@@ -21,9 +22,11 @@ extern char **environ;
 #ifndef RAWGPU_DEFAULT_CLANG
 #define RAWGPU_DEFAULT_CLANG "/opt/homebrew/opt/llvm/bin/clang"
 #endif
-#ifndef RAWGPU_DEFAULT_LOCAL
-#define RAWGPU_DEFAULT_LOCAL "local"
+#ifndef RAWGPU_VERSION
+#define RAWGPU_VERSION "dev"
 #endif
+
+const char *rawgpu_version(void) { return RAWGPU_VERSION; }
 
 /* built-in kernels, embedded at build time (build/gen/embedded.c) */
 extern const unsigned char rawgpu_embedded_sgemm[];
@@ -99,10 +102,6 @@ static bool card_up(rg_dev *d) {
 }
 
 static int bringup(rawgpu *g) {
-  if (!getenv("RAWGPU_FIRMWARE")) {
-    struct stat st;
-    if (stat("local/firmware", &st)) setenv("RAWGPU_FIRMWARE", RAWGPU_DEFAULT_LOCAL "/firmware", 0);
-  }
   const char *steps[] = {"post", "mc-load", "dpm-enable"};
   for (int i = 0; i < 3; i++) {
     const rg_cmd *c = find_cmd(steps[i]);
@@ -336,7 +335,7 @@ rawgpu_program *rawgpu_program_build(rawgpu *g, const char *source, const char *
   if (!clang) clang = RAWGPU_DEFAULT_CLANG;
   char libdir[1024];
   if (libs) snprintf(libdir, sizeof libdir, "%s", libs);
-  else snprintf(libdir, sizeof libdir, "%s/device-libs", RAWGPU_DEFAULT_LOCAL);
+  else snprintf(libdir, sizeof libdir, "%s/device-libs", rg_data_dir());
   if (!options) options = "";
   char dir[1024];
   cache_dir(dir, sizeof dir);

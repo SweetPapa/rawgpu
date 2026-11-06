@@ -67,6 +67,17 @@
     ],
     "macOS": {
       "minimumSystemVersion": "13.0"
-    }
+    },
+    "externalBin": [
+      "binaries/rawgpu"
+    ],
+    "resources": {
+      "../../tools/fetch-firmware.sh": "scripts/fetch-firmware.sh",
+      "../../tools/install-tinygpu.sh": "scripts/install-tinygpu.sh",
+      "../../LICENSE": "LICENSE",
+      "../../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "binaries/THIRD_PARTY_RUST.md": "THIRD_PARTY_RUST.md"
+    },
+    "copyright": "\u00a9 2026 Forrester Terry. MIT license."
   }
 }

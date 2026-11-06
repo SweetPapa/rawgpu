@@ -17,10 +17,15 @@
 set -eu
 
 DEB=rocm-device-libs-17_6.0+git20231212.5a852ed-2_arm64.deb
-URL="http://deb.debian.org/debian/pool/main/r/rocm-device-libs/$DEB"
+URL="https://deb.debian.org/debian/pool/main/r/rocm-device-libs/$DEB"
 DEB_SHA=7993b4ed1de284c06ab4a7cdcbb2c1f337f7fba6f1d7ed7ebaed993de0800b2c
 INNER=usr/lib/llvm-17/lib/clang/17/amdgcn/bitcode
-DEST="$(cd "$(dirname "$0")/.." && pwd)/local/device-libs"
+# Where to: $RAWGPU_HOME/device-libs if set; this checkout's local/device-libs when run from a checkout;
+# otherwise ~/Library/Application Support/rawgpu/device-libs, where a release build of rawgpu looks.
+here="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -n "${RAWGPU_HOME:-}" ]; then DEST="$RAWGPU_HOME/device-libs"
+elif [ -f "$here/src/rawgpu_lib.c" ]; then DEST="$here/local/device-libs"
+else DEST="$HOME/Library/Application Support/rawgpu/device-libs"; fi
 
 FILES='
 opencl.bc                          399348551ba1d43f235a61bb2a580eb11557be466447199b47f9b428345eddfb

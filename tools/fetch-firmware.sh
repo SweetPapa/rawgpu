@@ -1,6 +1,6 @@
 #!/bin/sh
 # Download the AMD firmware rawgpu loads, from a pinned linux-firmware commit,
-# into local/firmware/amdgpu/ (gitignored). Every file is checked against the
+# into local/firmware/amdgpu/ (gitignored; see below). Every file is checked against the
 # sha256 recorded here; a mismatch deletes the download and fails.
 #
 # The blobs are AMD's, under LICENSES/LICENSE.amdgpu (redistributable, no
@@ -11,7 +11,12 @@ set -eu
 
 COMMIT=703a4d95f86606b14b8433e7197663874ef89eed
 BASE="https://gitlab.com/kernel-firmware/linux-firmware/-/raw/$COMMIT"
-DEST="$(cd "$(dirname "$0")/.." && pwd)/local/firmware"
+# Where to: $RAWGPU_HOME/firmware if set; this checkout's local/firmware when run from a checkout;
+# otherwise ~/Library/Application Support/rawgpu/firmware, where a release build of rawgpu looks.
+here="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -n "${RAWGPU_HOME:-}" ]; then DEST="$RAWGPU_HOME/firmware"
+elif [ -f "$here/src/rawgpu_lib.c" ]; then DEST="$here/local/firmware"
+else DEST="$HOME/Library/Application Support/rawgpu/firmware"; fi
 
 # path  sha256  what loads it
 FILES='
@@ -26,7 +31,11 @@ amdgpu/polaris10_ce_2.bin    790ca90f5afa001a858909619a222442bfaec1a1f63c47396d2
 amdgpu/polaris10_pfp_2.bin   bf1ca44ceefd73df8a8e350540d8758d9041e9e2b9cd0bd77e647ed7151ed9eb  CP PFP
 amdgpu/polaris10_me_2.bin    35c778c82c006a28f129186c414c37d7acbdb23fefb4cb84c1f705886f372fdd  CP ME
 amdgpu/polaris10_k2_smc.bin  b5d34a4b0ea0d0c9c53dddcac93e9e01fe759f0ad9a0b0d0b4905e5a6b254d03  SMC on Polaris 30 (power management)
+amdgpu/polaris10_k_smc.bin   98fa36d74fa933a73419257daae924fda290a7208aa42584a9dd89e1cc44e05d  SMC on Polaris 20
+amdgpu/polaris10_smc.bin     f7ac568d6e2098a26fc61fc321df1330f9d8952e9b0b47e0309f1d8e6b6727fb  SMC on Polaris 10
+amdgpu/polaris10_smc_sk.bin  09cc712ec2d30cac29e4b0606c3844d7eae15d6663f73d3f48a695e7324491c1  SMC on soft-key boards
 amdgpu/polaris10_k_mc.bin    78a0e88d669cf91c09cd027ac3b5bd0c08ac126a8488092c567ecda21824e9ad  MC sequencer on Polaris 30
+amdgpu/polaris10_mc.bin      fff3926e5e5903a87d40d6f6b7c756bd8ecf6fd9c47fced867add1fdc9fe11b6  MC sequencer, other boards
 LICENSES/LICENSE.amdgpu      572872598565dc3513470de971a32bf9db301f47afeef3636345eadae33b2eee  license
 '
 

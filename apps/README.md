@@ -9,16 +9,23 @@ make install-apps     # builds both into ~/Applications (needs cargo, and npx fo
 make apps             # builds them only, into apps/target/release/bundle/macos/
 ```
 
-Both find this checkout through the path they were built from: the CLI in
-`build/rawgpu` and the Python venv in `local/eg2-venv`. Rebuild them if the
-checkout moves. For the CLI, `RAWGPU_BIN` overrides the path, and for the
-venv, `RAWGPU_REPO`.
+- **The menu bar app carries its own copy of the CLI** (`Contents/MacOS/rawgpu`)
+  and the setup scripts, so a release needs no checkout. `RAWGPU_BIN`
+  overrides the CLI.
+- **Code Search** finds the Python venv (`local/eg2-venv`) and the sidecar
+  through the checkout it was built from; `RAWGPU_REPO` overrides that. It
+  is not in releases (docs/RELEASING.md).
 
 ## rawgpu (menu bar)
 
 A chip icon in the menu bar. It's filled while a program uses the card, faded
 when nothing is connected, and shows a "!" when the card needs attention.
 Click it for the panel, or right-click for a menu.
+
+**Setup:** until TinyGPU is installed and approved, a card is attached and
+the firmware is downloaded, the panel shows a checklist. Its buttons install
+TinyGPU (the verified script), open the right pane of System Settings, and
+download the firmware. `rawgpu doctor --json` supplies the checks.
 
 **The panel:**
 - **Status:** a status pill (Ready, In use, Ejecting, Disconnected, Needs

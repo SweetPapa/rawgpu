@@ -52,6 +52,7 @@
     ],
     "macOS": {
       "minimumSystemVersion": "13.0"
-    }
+    },
+    "copyright": "\u00a9 2026 Forrester Terry. MIT license."
   }
 }

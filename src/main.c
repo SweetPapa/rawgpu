@@ -1,18 +1,31 @@
 /* rawgpu CLI. Every command is read-only unless noted. */
+#include "amd_fw.h"
 #include "amd_kernel.h"
 #include "rawgpu.h"
 #include "rg.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <libproc.h>
+#include <mach-o/dyld.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <time.h>
 #include <unistd.h>
+
+#ifndef RAWGPU_DEFAULT_CLANG
+#define RAWGPU_DEFAULT_CLANG "/opt/homebrew/opt/llvm/bin/clang"
+#endif
+#define RAWGPU_DEFAULT_CLANG_PATH RAWGPU_DEFAULT_CLANG
+#ifndef RAWGPU_DEFAULT_LOCAL
+#define RAWGPU_DEFAULT_LOCAL ""
+#endif
+#define RAWGPU_DEFAULT_LOCAL_DIR RAWGPU_DEFAULT_LOCAL
 
 static const char *usage =
   "usage: rawgpu [--sock PATH] <command>\n"
@@ -24,12 +37,14 @@ static const char *usage =
   "  bench [N]        round-trip latency of config and register reads\n"
   "  dma-test [KB]    allocate a DMA buffer and print its bus addresses (no GPU activity)\n"
   "  reset            WRITES: PCIe reset through TinyGPU (FLR, else hot reset); a no-op on the RX 590\n"
+  "  doctor [--json]  check the setup: TinyGPU, the card, firmware, the kernel compiler (no GPU access)\n"
   "  up               WRITES: bring the card up if it needs it (post, mc-load, dpm-enable), as the library does\n"
   "  who [--json]     the TinyGPU server and the program using the card (never connects, never starts a server)\n"
   "  eject [--timeout SECONDS]\n"
   "                   wait for the program using the card to finish, stop the card's engines, close it,\n"
   "                   and stop the TinyGPU server; then says it is safe to unplug\n"
-  "  kernel-info FILE describe the kernels in a code object (no GPU needed)\n";
+  "  kernel-info FILE describe the kernels in a code object (no GPU needed)\n"
+  "  --version        print the version\n";
 
 static void print_backend_usage(FILE *f, const rg_backend *b) {
   fprintf(f, "\n%s commands:\n", b->name);
@@ -389,6 +404,141 @@ static int cmd_who(const char *sock, int argc, char **argv) {
   return 0;
 }
 
+/* ---- rawgpu doctor ---- */
+
+/* Does a command's output contain needle? (for systemextensionsctl and ioreg) */
+static bool output_has(const char *cmd, const char *needle, const char *also) {
+  FILE *p = popen(cmd, "r");
+  if (!p) return false;
+  char line[2048];
+  bool hit = false;
+  while (fgets(line, sizeof line, p))
+    if (strstr(line, needle) && (!also || strstr(line, also))) hit = true;
+  pclose(p);
+  return hit;
+}
+
+static bool file_ok(const char *dir, const char *rel) {
+  char path[1400];
+  snprintf(path, sizeof path, "%s/%s", dir, rel);
+  struct stat st;
+  return !stat(path, &st) && S_ISREG(st.st_mode) && st.st_size > 0;
+}
+
+/* Where the fetch and install scripts are: a checkout's tools/ for a build from one; beside a release
+ * binary, ../share/rawgpu (the tarball) or ../Resources/scripts (inside the menu bar app). */
+static void script_dir(char *out, size_t n) {
+  char exe[1024], cand[1200], real[PATH_MAX];
+  uint32_t sz = sizeof exe;
+  struct stat st;
+  out[0] = 0;
+  if (RAWGPU_DEFAULT_LOCAL_DIR[0]) {
+    snprintf(cand, sizeof cand, "%s/../tools", RAWGPU_DEFAULT_LOCAL_DIR);
+    if (!stat(cand, &st) && realpath(cand, real)) { snprintf(out, n, "%s", real); return; }
+  }
+  if (_NSGetExecutablePath(exe, &sz)) return;
+  char *slash = strrchr(exe, '/');
+  if (!slash) return;
+  *slash = 0;
+  const char *rel[] = {"../share/rawgpu", "../Resources/scripts", "scripts"};
+  for (int i = 0; i < 3; i++) {
+    snprintf(cand, sizeof cand, "%s/%s", exe, rel[i]);
+    if (!stat(cand, &st) && realpath(cand, real)) { snprintf(out, n, "%s", real); return; }
+  }
+}
+
+/* `rawgpu doctor`: is everything rawgpu needs in place? Only looks: never opens the card or starts a server. */
+static int cmd_doctor(const char *sock, int argc, char **argv) {
+  bool json = argc == 1 && !strcmp(argv[0], "--json");
+  if (argc && !json) { fprintf(stderr, "usage: rawgpu doctor [--json]\n"); return -EINVAL; }
+  int arm = 0;
+  size_t al = sizeof arm;
+  if (sysctlbyname("hw.optional.arm64", &arm, &al, NULL, 0)) arm = 0;
+  bool tg_app = access("/Applications/TinyGPU.app/Contents/MacOS/TinyGPU", X_OK) == 0;
+  bool tg_on = tg_app && output_has("systemextensionsctl list 2>/dev/null", "org.tinygrad.tinygpu", "[activated enabled]");
+  bool bound = output_has("ioreg -r -n tinygpu -d 1 2>/dev/null", "tinygpu", NULL);
+  char buf[1024];
+  const char *path = rg_tinygpu_sock_path(sock, buf, sizeof buf);
+  int server, other, others = rg_tinygpu_processes(path, &server, &other);
+  int clients = server ? server_clients(server) : 0;
+
+  const char *data = rg_data_dir();
+  char fw[1100], libs[1100];
+  const char *fwenv = getenv("RAWGPU_FIRMWARE"), *libenv = getenv("RAWGPU_DEVICE_LIBS");
+  snprintf(fw, sizeof fw, "%s", fwenv ? fwenv : "");
+  if (!fwenv) snprintf(fw, sizeof fw, "%s/firmware", data);
+  snprintf(libs, sizeof libs, "%s", libenv ? libenv : "");
+  if (!libenv) snprintf(libs, sizeof libs, "%s/device-libs", data);
+  static const char *common[] = {"sdma", "sdma1", "rlc", "mec", "mec_2", "mec2", "mec2_2", "ce_2", "pfp_2", "me_2"};
+  static const char *smc[] = {"smc", "k_smc", "k2_smc", "smc_sk"}, *mc[] = {"mc", "k_mc"};
+  char missing[512] = "";
+  for (size_t i = 0; i < sizeof common / sizeof *common; i++) {
+    char rel[64];
+    snprintf(rel, sizeof rel, "amdgpu/polaris10_%s.bin", common[i]);
+    if (!file_ok(fw, rel)) snprintf(missing + strlen(missing), sizeof missing - strlen(missing), "%s%s", missing[0] ? " " : "", rel + 7);
+  }
+  bool any_smc = false, any_mc = false;
+  for (size_t i = 0; i < 4; i++) { char rel[64]; snprintf(rel, sizeof rel, "amdgpu/polaris10_%s.bin", smc[i]); any_smc |= file_ok(fw, rel); }
+  for (size_t i = 0; i < 2; i++) { char rel[64]; snprintf(rel, sizeof rel, "amdgpu/polaris10_%s.bin", mc[i]); any_mc |= file_ok(fw, rel); }
+  bool fw_ok = !missing[0] && any_smc && any_mc;
+  bool libs_ok = file_ok(libs, "opencl.bc") && file_ok(libs, "ocml.bc") && file_ok(libs, "ockl.bc");
+  const char *clang = getenv("RAWGPU_CLANG") ? getenv("RAWGPU_CLANG") : RAWGPU_DEFAULT_CLANG_PATH;
+  bool clang_ok = access(clang, X_OK) == 0;
+  char scripts[1200];
+  script_dir(scripts, sizeof scripts);
+  if (!scripts[0]) snprintf(scripts, sizeof scripts, "<rawgpu>/tools");
+
+  if (json) {
+    printf("{\"version\":");
+    json_str(rawgpu_version());
+    printf(",\"apple_silicon\":%s,\"tinygpu_installed\":%s,\"tinygpu_enabled\":%s,\"card_bound\":%s,"
+           "\"server_pid\":%d,\"client_count\":%d,\"other_tinygpu\":%d,\"data_dir\":",
+           arm ? "true" : "false", tg_app ? "true" : "false", tg_on ? "true" : "false", bound ? "true" : "false",
+           server, clients, others);
+    json_str(data);
+    printf(",\"firmware_dir\":");
+    json_str(fw);
+    printf(",\"firmware_ok\":%s,\"firmware_missing\":", fw_ok ? "true" : "false");
+    json_str(missing[0] ? missing : any_smc && any_mc ? "" : "smc/mc");
+    printf(",\"device_libs_dir\":");
+    json_str(libs);
+    printf(",\"device_libs_ok\":%s,\"clang\":", libs_ok ? "true" : "false");
+    json_str(clang);
+    printf(",\"clang_ok\":%s,\"scripts\":", clang_ok ? "true" : "false");
+    json_str(scripts);
+    printf("}\n");
+    return 0;
+  }
+  printf("rawgpu %s\n\n", rawgpu_version());
+  char fix_tg[1400], fix_fw[1400], fix_libs[1400];
+  snprintf(fix_tg, sizeof fix_tg, "run %s/install-tinygpu.sh", scripts);
+  snprintf(fix_fw, sizeof fix_fw, "run %s/fetch-firmware.sh (into %s)", scripts, fw);
+  snprintf(fix_libs, sizeof fix_libs, "run %s/fetch-device-libs.sh (into %s)", scripts, libs);
+  const struct { bool ok; const char *what, *fix; } c[7] = {
+    {arm, "Apple Silicon Mac", "rawgpu needs an Apple Silicon Mac (TinyGPU is arm64 only)"},
+    {tg_app, "TinyGPU installed (/Applications/TinyGPU.app)", fix_tg},
+    {tg_on, "TinyGPU driver extension approved and enabled",
+     "approve it: System Settings > General > Login Items & Extensions > Driver Extensions > TinyGPU"},
+    {bound, "a card is attached and TinyGPU has bound to it",
+     "plug in the enclosure with an AMD card and power it on; it binds about 10 s after the driver is approved"},
+    {fw_ok, "AMD firmware", fix_fw},
+    {libs_ok, "device libraries (only to compile OpenCL kernels)", fix_libs},
+    {clang_ok, "kernel compiler: LLVM with the AMDGPU target (only to compile kernels)",
+     "brew install llvm, or set RAWGPU_CLANG"},
+  };
+  int bad = 0;
+  for (int i = 0; i < 7; i++) {
+    printf("  %s  %s\n", c[i].ok ? "ok " : "NO ", c[i].what);
+    if (!c[i].ok) { printf("       -> %s\n", c[i].fix); bad++; }
+  }
+  printf("\n  data folder:   %s\n", data);
+  if (server) printf("  TinyGPU server: pid %d, %s\n", server, clients ? "a program has the card (rawgpu who)" : "idle");
+  else printf("  TinyGPU server: not running (the next rawgpu command starts it)\n");
+  if (others) printf("  note: %d other TinyGPU process%s running, e.g. tinygrad's own server\n", others, others > 1 ? "es are" : " is");
+  printf("\n%s\n", bad ? "Fix the NO lines above, then run `rawgpu up`." : "Everything is in place. `rawgpu up` brings the card up.");
+  return 0;
+}
+
 /* `rawgpu up`: what rawgpu_open(RAWGPU_OPEN_BRINGUP) does. A card that is already up is left alone. */
 static int cmd_up(const char *sock) {
   rawgpu *g;
@@ -420,6 +570,8 @@ int main(int argc, char **argv) {
 
   if (!strcmp(cmd, "eject")) return cmd_eject(sock, argc - i, argv + i) ? 1 : 0; /* must not start a server */
   if (!strcmp(cmd, "who")) return cmd_who(sock, argc - i, argv + i) ? 1 : 0;     /* nor this */
+  if (!strcmp(cmd, "doctor")) return cmd_doctor(sock, argc - i, argv + i) ? 1 : 0; /* nor this */
+  if (!strcmp(cmd, "--version") || !strcmp(cmd, "version")) { printf("rawgpu %s\n", rawgpu_version()); return 0; }
   if (!strcmp(cmd, "up")) return cmd_up(sock) ? 1 : 0;
 
   rg_dev d;
