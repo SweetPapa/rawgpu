@@ -88,60 +88,139 @@ class _Kernel:
 
 
 class _Mem:
-    """A VRAM allocation, back to the pool when the last tensor using it goes."""
-    __slots__ = ("pool", "h", "n", "__weakref__")
+    """A block of VRAM inside a chunk, back to the pool when the last tensor using it goes."""
+    __slots__ = ("pool", "chunk", "h", "base", "n", "__weakref__")
 
-    def __init__(self, pool, h, n):
-        self.pool, self.h, self.n = pool, h, n
+    def __init__(self, pool, chunk, base, n):
+        self.pool, self.chunk, self.h, self.base, self.n = pool, chunk, chunk.h, base, n
 
     def __del__(self):
         try:
-            self.pool.give_back(self.h, self.n)
+            self.pool.give_back(self)
         except Exception:
             pass
 
 
+class _Chunk:
+    """One large rawgpu allocation, carved into blocks: a free list of (offset, size) extents, sorted and
+    coalesced."""
+    __slots__ = ("h", "size", "free", "used")
+
+    def __init__(self, h, size):
+        self.h, self.size, self.free, self.used = h, size, [[0, size]], 0
+
+    def take(self, n):
+        for i, e in enumerate(self.free):
+            if e[1] >= n:
+                off = e[0]
+                if e[1] == n:
+                    del self.free[i]
+                else:
+                    e[0] += n
+                    e[1] -= n
+                self.used += n
+                return off
+        return None
+
+    def put(self, off, n):
+        import bisect
+        f = self.free
+        i = bisect.bisect_left(f, [off, 0])
+        self.used -= n
+        if i > 0 and f[i - 1][0] + f[i - 1][1] == off:
+            f[i - 1][1] += n
+            if i < len(f) and f[i - 1][0] + f[i - 1][1] == f[i][0]:
+                f[i - 1][1] += f[i][1]
+                del f[i]
+        elif i < len(f) and off + n == f[i][0]:
+            f[i][0], f[i][1] = off, f[i][1] + n
+        else:
+            f.insert(i, [off, n])
+
+
 class _Pool:
-    """Reuses VRAM by exact size. Training repeats the same shapes every step, so after the first step nearly
-    every tensor comes from here. Reuse is safe without waiting: launches run in order, so a kernel that
-    writes a reused buffer runs after every kernel that read its old contents."""
+    """VRAM for tensors. rawgpu's own allocator aligns every buffer to 64 KB and tracks a few hundred free
+    extents, which suits a model's weights but not the thousands of small tensors of a training step, so
+    the pool takes VRAM in chunks of CHUNK bytes and carves them itself.
+
+    Freed blocks go to a cache by exact size first: training repeats the same shapes every step, so after
+    the first step nearly every tensor comes from there. When a chunk is full the cache is folded back into
+    the chunks' free lists (coalescing), and only then is a new chunk allocated. Reuse needs no waiting:
+    launches run in order, so a kernel that writes a reused block runs after every kernel that read it."""
+    CHUNK = 256 << 20
 
     def __init__(self, dev):
-        self.dev, self.free, self.in_use, self.cached, self.peak = dev, {}, 0, 0, 0
+        self.dev, self.chunks, self.cache = dev, [], {}
+        self.in_use = self.cached = self.peak = 0
 
     def alloc(self, nbytes):
         n = max(256, (int(nbytes) + 255) & ~255)
-        lst = self.free.get(n)
+        lst = self.cache.get(n)
         if lst:
-            h = lst.pop()
+            chunk, off = lst.pop()
             self.cached -= n
         else:
-            L = _L()
-            h = L.rawgpu_alloc(self.dev._h, n, rawgpu.MEM_VRAM)
-            if not h:
-                self.release()
-                h = L.rawgpu_alloc(self.dev._h, n, rawgpu.MEM_VRAM)
-                if not h:
-                    raise MemoryError(f"out of VRAM allocating {n >> 20} MB ({self.in_use >> 20} MB in use)")
+            chunk, off = self._carve(n)
         self.in_use += n
         self.peak = max(self.peak, self.in_use)
-        return _Mem(self, h, n)
+        return _Mem(self, chunk, off, n)
 
-    def give_back(self, h, n):
+    def _carve(self, n):
+        for c in self.chunks:
+            off = c.take(n)
+            if off is not None:
+                return c, off
+        if self.cached:
+            self.flush()
+            for c in self.chunks:
+                off = c.take(n)
+                if off is not None:
+                    return c, off
+        size = max(self.CHUNK, (n + 0xffff) & ~0xffff)
+        L = _L()
+        h = L.rawgpu_alloc(self.dev._h, size, rawgpu.MEM_VRAM)
+        if not h:
+            self.release()
+            h = L.rawgpu_alloc(self.dev._h, size, rawgpu.MEM_VRAM)
+            if not h and size > n:  # the last of the card: a chunk just big enough
+                size = (n + 0xffff) & ~0xffff
+                h = L.rawgpu_alloc(self.dev._h, size, rawgpu.MEM_VRAM)
+            if not h:
+                raise MemoryError(f"out of VRAM allocating {n / 2**20:.1f} MB "
+                                  f"({self.in_use >> 20} MB in use by tensors)")
+        c = _Chunk(h, size)
+        self.chunks.append(c)
+        return c, c.take(n)
+
+    def give_back(self, mem):
         if self.dev._h is None:
             return
-        self.free.setdefault(n, []).append(h)
-        self.in_use -= n
-        self.cached += n
+        self.cache.setdefault(mem.n, []).append((mem.chunk, mem.base))
+        self.in_use -= mem.n
+        self.cached += mem.n
+
+    def flush(self):
+        """Fold the cache back into the chunks' free lists"""
+        for n, lst in self.cache.items():
+            for chunk, off in lst:
+                chunk.put(off, n)
+        self.cache.clear()
+        self.cached = 0
 
     def release(self):
-        """Return the cached buffers to the driver."""
+        """Return chunks with no tensors in them to the driver"""
+        self.flush()
         L = _L()
-        for lst in self.free.values():
-            for h in lst:
-                L.rawgpu_free(self.dev._h, h)
-        self.free.clear()
-        self.cached = 0
+        keep = []
+        for c in self.chunks:
+            if c.used == 0:
+                L.rawgpu_free(self.dev._h, c.h)
+            else:
+                keep.append(c)
+        self.chunks = keep
+
+    def reserved(self):
+        return sum(c.size for c in self.chunks)
 
 
 class _Staging:
@@ -188,7 +267,7 @@ class Context:
     def memory(self):
         """VRAM held by tensors, cached for reuse, the peak, and free on the card (bytes)."""
         return dict(in_use=self.pool.in_use, cached=self.pool.cached, peak=self.pool.peak,
-                    free=self.dev.info["vram_free_bytes"])
+                    reserved=self.pool.reserved(), free=self.dev.info["vram_free_bytes"])
 
     def close(self):
         self.pool.release()
@@ -237,6 +316,16 @@ def no_grad():
         _grad_enabled = old
 
 
+@contextlib.contextmanager
+def enable_grad():
+    global _grad_enabled
+    old, _grad_enabled = _grad_enabled, True
+    try:
+        yield
+    finally:
+        _grad_enabled = old
+
+
 class Tensor:
     __slots__ = ("mem", "off", "rows", "cols", "ld", "shape", "dtype", "requires_grad", "grad", "_back",
                  "_parents", "name", "__weakref__")
@@ -255,7 +344,7 @@ class Tensor:
     # -- basics
     @property
     def arg(self):
-        return (self.mem.h, self.off * 4)
+        return (self.mem.h, self.mem.base + self.off * 4)
 
     @property
     def size(self):
@@ -271,7 +360,7 @@ class Tensor:
             return np.empty(self.shape, self.dtype)
         n = (self.rows - 1) * self.ld + self.cols
         out = np.empty(self.rows * self.ld, self.dtype)
-        if _L().rawgpu_read(_ctx.dev._h, self.mem.h, self.off * 4, out.ctypes.data, n * 4):
+        if _L().rawgpu_read(_ctx.dev._h, self.mem.h, self.mem.base + self.off * 4, out.ctypes.data, n * 4):
             raise _ctx.dev._err()
         return out.reshape(self.rows, self.ld)[:, :self.cols].reshape(self.shape).copy()
 
@@ -980,8 +1069,8 @@ def attention(q, k, v, batch, T, heads, kv_heads=None, causal=False, scale_=None
             dst, beta = _target(dst_t)
             for gi in range(group):
                 # A: the scores of query head kvh * group + gi, transposed; B: that head's q (or dO) columns
-                A = (src.mem.h, (src.off + gi * T * sp) * 4)
-                Bm = (other.mem.h, (other.off + gi * hd) * 4)
+                A = (src.mem.h, src.mem.base + (src.off + gi * T * sp) * 4)
+                Bm = (other.mem.h, other.mem.base + (other.off + gi * hd) * 4)
                 _K("bgemm_tn")(A, Bm, dst.arg, T, hd, T, sp, other.ld, dst.ld, 1.0, beta if gi == 0 else 1.0,
                                kv_heads, 1, heads * T * sp, group * T * sp, T * other.ld, group * hd,
                                T * dst.ld, hd, g=(tiles(hd), tiles(T), batch * kv_heads), l=(16, 16, 1))
@@ -1042,6 +1131,31 @@ def pool_mean(x, lens, batch, T):
         dx, beta = _target(x)
         _K("pool_mean_bwd")(g.arg, g.ld, lens.arg, T, dx.arg, dx.ld, x.rows, x.cols, beta, g=_grid(x.size), l=256)
     return _node(out, (x,), back)
+
+
+def checkpoint(fn, inputs, params=()):
+    """fn(*inputs) -> Tensor, without keeping its intermediate results: the backward pass runs fn again.
+    Trades a forward pass of compute for the memory of fn's activations (a transformer layer's are tens
+    of times its input's). `params`: the trainable tensors fn uses (so the gradient reaches them even when
+    no input needs one)."""
+    inputs = tuple(inputs)
+    with no_grad():
+        out = fn(*inputs)
+
+    def back(g):
+        ins = []
+        for x in inputs:
+            d = x.detach()
+            d.requires_grad = x.requires_grad
+            ins.append(d)
+        with enable_grad():
+            o = fn(*ins)
+        if o.requires_grad:
+            o.backward(g)
+        for d, x in zip(ins, inputs):
+            if x.requires_grad and d.grad is not None:
+                _give(x, d.grad)
+    return _node(out, inputs + tuple(params), back)
 
 
 __all__ = [n for n in dir() if not n.startswith("_") and n not in ("contextlib", "ctypes", "math", "os", "np",

@@ -7,10 +7,6 @@ from . import core as F
 from .core import Tensor
 
 
-class Parameter:
-    """Marks a tensor a Module owns and trains. Use Module.param() to make one."""
-
-
 def _param(a, name=None):
     t = F.tensor(np.asarray(a, np.float32), requires_grad=True, name=name)
     return t
@@ -38,17 +34,19 @@ class Module:
                         yield n, p
 
     def _children(self, prefix):
-        for k, v in vars(self).items():
-            if k.startswith("_"):
-                continue
+        """(name, value) of each tensor or module in the attributes, through nested lists and dicts"""
+        def walk(name, v):
             if isinstance(v, (list, tuple)):
                 for i, x in enumerate(v):
-                    yield f"{prefix}{k}.{i}", x
+                    yield from walk(f"{name}.{i}", x)
             elif isinstance(v, dict):
                 for i, x in v.items():
-                    yield f"{prefix}{k}.{i}", x
-            else:
-                yield prefix + k, v
+                    yield from walk(f"{name}.{i}", x)
+            elif isinstance(v, (Tensor, Module)):
+                yield name, v
+        for k, v in vars(self).items():
+            if not k.startswith("_"):
+                yield from walk(prefix + k, v)
 
     def parameters(self):
         return [p for _, p in self.named_parameters()]

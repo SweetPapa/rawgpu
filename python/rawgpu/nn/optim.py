@@ -18,7 +18,7 @@ class _Clip:
         live = [p for p in params if p.grad is not None]
         for i, p in enumerate(live):
             g = p.grad
-            k["sumsq_parts"](g.arg, g.ld, g.rows, g.cols, (self.parts.mem.h, i * PARTS * 4), g=PARTS * 256, l=256)
+            k["sumsq_parts"](g.arg, g.ld, g.rows, g.cols, (self.parts.mem.h, self.parts.mem.base + i * PARTS * 4), g=PARTS * 256, l=256)
         k["clip_factor"](self.parts.arg, len(live) * PARTS, float(max_norm or 0.0), self.out.arg, g=256, l=256)
 
 
