@@ -15,7 +15,7 @@ Dated, factual notes from real hardware. Newest first.
   - rawgpu is now MIT (`LICENSE`).
   - The apps' 239 Rust crates are MIT, Apache-2.0, BSD-like, Unicode and 5
     MPL-2.0, none GPL. `tools/rust-licenses.py` lists them into the app.
-  - The commits' author email was moved off a work address.
+  - The commits' author email is now a personal address.
 - **Built-in paths:** release binaries recorded the checkout's paths for
   firmware and device libraries. `make RELEASE=1` leaves them out.
   `rg_data_dir()` is `$RAWGPU_HOME`, else the checkout's `local/` (a source
@@ -40,9 +40,7 @@ Dated, factual notes from real hardware. Newest first.
 - **`tools/package-release.sh`** builds a release from a clean copy of the
   tracked files: a CLI/library/Python tarball and the app, signed with the
   hardened runtime and notarized. `.github/workflows/release.yml` runs it on
-  a `v*` tag, into a draft release. It only signs as team 6Y5SZ2K5XY; the
-  keychain here also holds Stanford Developer IDs, which must never sign
-  this.
+  a `v*` tag, into a draft release. It only signs as team 6Y5SZ2K5XY.
 - **`.github/workflows/ci.yml`** builds everything without a GPU and checks
   that a release binary has no build path in it. It is manual while the
   repository is private, since macOS minutes cost 10x there.
