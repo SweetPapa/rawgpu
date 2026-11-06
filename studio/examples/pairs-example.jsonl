@@ -1,0 +1,6 @@
+{"query": "how do I reset my password", "document": "To reset your password, open Settings > Account and choose Reset password; a link arrives by email."}
+{"query": "what does error 503 mean", "document": "A 503 Service Unavailable means the server is overloaded or down for maintenance; retry later."}
+{"query": "enable two-factor authentication", "document": "Two-factor authentication: Settings > Security > Two-factor, then scan the QR code with an authenticator app."}
+{"query": "export my data as csv", "document": "Use File > Export and pick CSV to download every record in the current view."}
+{"query": "change the billing address", "document": "Billing details live under Account > Billing; edit the address and save."}
+{"query": "why is the app slow", "document": "Slowness usually comes from a full cache: clear it under Settings > Storage, then restart the app."}

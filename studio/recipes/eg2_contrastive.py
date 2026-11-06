@@ -208,5 +208,13 @@ def train(run):
     out = os.path.join(run.dir, "model")
     run.set_status(message="Exporting the model")
     model.export(out)
-    run.event("info", total - 1, text=f"Exported a model directory to {out}: "
-                                      f"EmbeddingGemma2(path='{out}') loads it (re-index to search with it).")
+    # the export must reproduce the trained model: load it with the inference engine and compare
+    from eg2 import EmbeddingGemma2
+    ref = EmbeddingGemma2(gpu=nn.ctx().dev, path=out, max_tokens=4096, max_seq=1024, verbose=False)
+    a, b = ref.encode(qs[:16], prompt="code"), model.encode(qs[:16], "code")
+    del ref
+    worst = float((a * b).sum(1).min())
+    run.summary(export_cosine=worst)
+    run.event("info", total - 1, text=f"Exported a model directory to {out}; loaded back with eg2.py it reproduces "
+                                      f"the trained model (worst cosine {worst:.6f} over 16 queries). "
+                                      f"EmbeddingGemma2(path='{out}') loads it; re-index to search with it.")

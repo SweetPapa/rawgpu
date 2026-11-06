@@ -236,6 +236,9 @@ def train(run):
     data = load(run, rng)
     E, split = data["E"], data["split"]
     tr, va, te = E[split == 0], E[split == 1], E[split == 2]
+    if min(len(tr), len(va), len(te)) == 0:
+        raise ValueError(f"too few examples to split ({len(E)}: {len(tr)} train, {len(va)} validation, {len(te)} test); "
+                         f"states are split 80/10/10, so use at least a few dozen distinct states")
     run.event("info", 0, text=f"{data['what']}; {len(tr):,} train / {len(va):,} validation / {len(te):,} test; "
                               f"{len(data['opt_names'])} options in all")
     model = build(run.params, rng)

@@ -130,6 +130,9 @@ def train(run):
     X, Y, names, desc, split, what = load_data(run, rng)
     K, D = Y.shape[1], X.shape[1]
     tr, va, te = (split == 0), (split == 1), (split == 2)
+    if min(tr.sum(), va.sum(), te.sum()) == 0:
+        raise ValueError(f"too few examples to split ({len(X)}: {tr.sum()} train, {va.sum()} validation, {te.sum()} "
+                         f"test); texts are split 80/10/10, so use at least a few dozen")
     run.event("info", 0, text=f"{what}; {tr.sum():,} train / {va.sum():,} validation / {te.sum():,} test; "
                               f"{K} concepts: {', '.join(names)}")
     model = build(D, K, run.p("hidden", 0), rng)

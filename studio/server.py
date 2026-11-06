@@ -49,6 +49,7 @@ class Studio:
         self.lock = threading.Lock()
         self.proc = None        # the runner that has the card
         self.current = None     # its run id
+        self.adopted = None     # or the pid of a runner a previous server started, still running
         self.trying = False
         self._card = (0.0, None)
         self.recipes = recipes.catalog()
@@ -64,20 +65,23 @@ class Studio:
             raise KeyError(rid)
         return p
 
+    @staticmethod
+    def alive(pid):
+        try:
+            os.kill(int(pid), 0)
+            return True
+        except (OSError, TypeError, ValueError):
+            return False
+
     def recover(self):
-        """Runs left 'running' by a server that went away are not running any more"""
+        """A run still running from a previous server (runners outlive it) is adopted: nothing else starts
+        until it exits. Runs left 'running' whose process is gone are marked stopped."""
         for rid in os.listdir(runs_dir()):
             st = read_json(os.path.join(runs_dir(), rid, "status.json"))
             if st and st.get("state") == "running":
-                pid = st.get("pid")
-                alive = False
-                if pid:
-                    try:
-                        os.kill(pid, 0)
-                        alive = True
-                    except OSError:
-                        pass
-                if not alive:
+                if self.alive(st.get("pid")) and self.adopted is None:
+                    self.adopted, self.current = int(st["pid"]), rid
+                else:
                     st.update(state="stopped", message="Interrupted; resume picks up from the last checkpoint")
                     write_json(os.path.join(runs_dir(), rid, "status.json"), st)
 
@@ -143,7 +147,7 @@ class Studio:
 
     def schedule(self):
         with self.lock:
-            if self.proc is not None or self.trying:
+            if self.proc is not None or self.adopted is not None or self.trying:
                 return
             queued = [r for r in self.list_runs() if r["state"] == "queued"]
             if not queued:
@@ -166,7 +170,15 @@ class Studio:
         while True:
             time.sleep(1)
             with self.lock:
-                p, rid = self.proc, self.current
+                p, rid, adopted = self.proc, self.current, self.adopted
+            if adopted is not None and not self.alive(adopted):
+                st = read_json(os.path.join(runs_dir(), rid, "status.json"), {}) or {}
+                if st.get("state") == "running":
+                    st.update(state="failed", error=st.get("error") or "the runner exited (see the log)",
+                              finished=time.time(), message="")
+                    write_json(os.path.join(runs_dir(), rid, "status.json"), st)
+                with self.lock:
+                    self.adopted, self.current = None, None
             if p is not None and p.poll() is not None:
                 st = read_json(os.path.join(runs_dir(), rid, "status.json"), {}) or {}
                 if st.get("state") == "running":  # the runner died without saying why
@@ -181,6 +193,9 @@ class Studio:
         with self.lock:
             if rid == self.current and self.proc is not None:
                 self.proc.send_signal(signal.SIGTERM)
+                return "stopping"
+            if rid == self.current and self.adopted is not None:
+                os.kill(self.adopted, signal.SIGTERM)
                 return "stopping"
         st = read_json(os.path.join(self.path(rid), "status.json"), {}) or {}
         if st.get("state") == "queued":
@@ -208,7 +223,7 @@ class Studio:
     def try_it(self, rid, req):
         d = self.path(rid)
         with self.lock:
-            if self.proc is not None:
+            if self.proc is not None or self.adopted is not None:
                 raise ValueError("the card is busy with a training run; try again when it finishes")
             self.trying = True
         try:
@@ -259,6 +274,17 @@ class Studio:
         return out
 
 
+def finite(o):
+    """o with NaN and infinities as None: JSON has no NaN, and a browser rejects the whole response over one"""
+    if isinstance(o, float):
+        return o if o == o and o not in (float("inf"), float("-inf")) else None
+    if isinstance(o, dict):
+        return {k: finite(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [finite(v) for v in o]
+    return o
+
+
 def lines_from(path, start):
     try:
         with open(path) as f:
@@ -284,7 +310,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _send(self, code, body, ctype="application/json"):
         if not isinstance(body, (bytes, bytearray)):
-            body = json.dumps(body).encode()
+            body = json.dumps(finite(body)).encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))

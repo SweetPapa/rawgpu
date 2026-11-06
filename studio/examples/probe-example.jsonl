@@ -1,0 +1,16 @@
+{"text": "The production database is down and checkout is failing for every customer.", "labels": ["needs action", "incident"]}
+{"text": "Disk usage on the build server reached 91%; it will fill in about two days.", "labels": ["needs action", "incident"]}
+{"text": "Reminder: the team photo is on Thursday at noon.", "labels": []}
+{"text": "Thanks for the quick fix yesterday, the report runs fine now!", "labels": ["good news"]}
+{"text": "Login latency doubled after the last deploy; users are complaining.", "labels": ["needs action", "incident"]}
+{"text": "New coffee machine in the kitchen, help yourselves.", "labels": ["good news"]}
+{"text": "Security alert: an unknown device signed in to the admin account.", "labels": ["needs action", "incident"]}
+{"text": "The quarterly newsletter draft is ready for review whenever you have time.", "labels": []}
+{"text": "Payment webhook errors spiked to 30% in the last ten minutes.", "labels": ["needs action", "incident"]}
+{"text": "Great demo today, the client loved the new dashboard.", "labels": ["good news"]}
+{"text": "The staging certificate expires in 5 days.", "labels": ["needs action"]}
+{"text": "Can someone review my pull request when free? No rush.", "labels": []}
+{"text": "Backups have failed for three nights in a row.", "labels": ["needs action", "incident"]}
+{"text": "The office will be closed on Monday for the holiday.", "labels": []}
+{"text": "Customer reports their invoice shows the wrong tax rate.", "labels": ["needs action"]}
+{"text": "We hit 10,000 users this morning, congratulations everyone!", "labels": ["good news"]}
