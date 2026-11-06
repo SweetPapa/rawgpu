@@ -138,7 +138,11 @@ install-apps: apps
 	@# unsigned Tauri bundles carry only the linker's signature, which leaves out their resources
 	codesign --force --deep --sign - "$(HOME)/Applications/rawgpu.app" "$(HOME)/Applications/Code Search.app"
 
+# the training web app (docs/TRAINING.md)
+studio: all
+	tools/studio.sh
+
 clean:
 	rm -rf build
 
-.PHONY: all ids regs atom-names kernels examples apps install-apps release clean
+.PHONY: all ids regs atom-names kernels examples apps install-apps release studio clean

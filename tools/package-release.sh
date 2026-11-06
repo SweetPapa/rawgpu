@@ -83,6 +83,7 @@ cp "$W/src/build/librawgpu.dylib" "$W/src/build/librawgpu.a" "$P/lib/"
 cp "$W/src/include/rawgpu.h" "$P/include/"
 cp -R "$W/src/python/rawgpu" "$P/python/"
 cp "$W/src/python/test_rawgpu.py" "$P/python/"
+cp "$W/src/kernels/sgemm.cl" "$P/python/rawgpu/nn/"   # rawgpu.nn compiles its kernels with it
 find "$P/python" -name __pycache__ -prune -exec rm -rf {} +
 cp "$W/src/tools/fetch-firmware.sh" "$W/src/tools/fetch-device-libs.sh" "$W/src/tools/install-tinygpu.sh" "$P/share/rawgpu/"
 cp "$W/src/examples/saxpy.c" "$P/examples/"

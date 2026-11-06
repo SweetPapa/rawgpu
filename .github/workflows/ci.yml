@@ -51,7 +51,9 @@ jobs:
 
       - name: Python and shell syntax
         run: |
-          python3 -m py_compile python/rawgpu/__init__.py python/*.py demos/*.py tools/*.py models/embeddinggemma2/*.py
+          python3 -m py_compile python/rawgpu/__init__.py python/rawgpu/nn/*.py python/*.py demos/*.py tools/*.py \
+            models/embeddinggemma2/*.py studio/*.py studio/recipes/*.py
+          node --check studio/ui/app.js
           for f in tools/*.sh; do bash -n "$f"; done
 
       - uses: actions/setup-node@v4

@@ -108,6 +108,24 @@ M4 Pro's own GPU (PyTorch MPS):
 
 See [models/embeddinggemma2/README.md](models/embeddinggemma2/README.md).
 
+## Training
+
+The card trains models too:
+- **`rawgpu.nn`** is a small autograd library. Every kernel has a backward pass, each checked against
+  PyTorch, plus AdamW, checkpointing and a VRAM pool.
+- **rawgpu Studio** (`tools/studio.sh`) is a local web app that runs training recipes and charts them
+  live: loss, evaluations, samples, and the card's temperature.
+
+The recipes:
+- a tiny GPT trained from scratch;
+- a JEPA world model that plans by searching imagined rollouts;
+- salience probes;
+- a Jev-style critic that answers typed questions with calibrated probabilities;
+- contrastive fine-tuning of EmbeddingGemma 2 itself, whose gradients match PyTorch's for all 388
+  weights.
+
+See [docs/TRAINING.md](docs/TRAINING.md).
+
 ## Before you start
 
 > **rawgpu is experimental.** It writes to the GPU's registers, runs its

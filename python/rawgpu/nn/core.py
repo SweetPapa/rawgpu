@@ -224,28 +224,44 @@ class _Pool:
 
 
 class _Staging:
-    """Uploads without waiting for the GPU: a ring of host buffers the GPU copies from. A blocking write
-    (rawgpu_write) would wait for every queued launch first."""
+    """Uploads without waiting for the GPU: a ring of host buffers the GPU copies from (a blocking write,
+    rawgpu_write, would first wait for every queued launch). Slots are SLOT bytes; a larger upload goes
+    through the ring in pieces of whole rows. The GPU reaches host memory through a window of limited
+    size, so the ring stays small."""
+    SLOT = 8 << 20
 
     def __init__(self, ctx, slots=6):
-        self.ctx, self.slots, self.i = ctx, [[None, 0, 0] for _ in range(slots)], 0  # buffer, bytes, event
+        self.ctx, self.slots, self.i = ctx, [[None, 0] for _ in range(slots)], 0  # buffer, last event
 
-    def upload(self, a, dst):
-        a = np.ascontiguousarray(a)
+    def _slot(self):
         slot = self.slots[self.i]
         self.i = (self.i + 1) % len(self.slots)
-        buf, cap, ev = slot
-        if ev:
-            self.ctx.dev.wait(ev)
-        if cap < a.nbytes:
-            buf = rawgpu.Buffer(self.ctx.dev, max(a.nbytes, 1 << 16), np.uint8, host=True)
-            slot[0], slot[1] = buf, buf.nbytes
-        view = buf.host_view()
-        view[:a.nbytes] = a.reshape(-1).view(np.uint8)
-        cols = dst.cols
-        e = self.ctx.k["axpby"]((buf._h, 0), cols, dst.arg, dst.ld, dst.rows, cols, 1.0, 0.0, 1,
-                                g=_grid(dst.rows * cols), l=256)
-        slot[2] = e
+        if slot[1]:
+            self.ctx.dev.wait(slot[1])
+        if slot[0] is None:
+            slot[0] = rawgpu.Buffer(self.ctx.dev, self.SLOT, np.uint8, host=True)
+        return slot
+
+    def upload(self, a, dst):
+        rows, cols = dst.rows, dst.cols
+        a = np.ascontiguousarray(a).reshape(rows, cols)
+        row_bytes = cols * 4
+        if row_bytes > self.SLOT:  # rows too wide for a slot: blocking writes, row by row
+            L = _L()
+            self.ctx.dev.finish()
+            for r in range(rows):
+                if L.rawgpu_write(self.ctx.dev._h, dst.mem.h, dst.mem.base + (dst.off + r * dst.ld) * 4,
+                                  a[r].ctypes.data, row_bytes):
+                    raise self.ctx.dev._err()
+            return
+        per = max(1, self.SLOT // row_bytes)
+        for r0 in range(0, rows, per):
+            n = min(per, rows - r0)
+            slot = self._slot()
+            view = slot[0].host_view()
+            view[:n * row_bytes] = a[r0:r0 + n].reshape(-1).view(np.uint8)
+            slot[1] = self.ctx.k["axpby"]((slot[0]._h, 0), cols, (dst.mem.h, dst.mem.base + (dst.off + r0 * dst.ld) * 4),
+                                          dst.ld, n, cols, 1.0, 0.0, 1, g=_grid(n * cols), l=256)
 
 
 class Context:

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>rawgpu Studio</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='6' y='6' width='20' height='20' rx='4' fill='%232a78d6'/%3E%3Cpath d='M11 20l4-5 3 3 4-6' stroke='white' stroke-width='2.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="6" y="6" width="20" height="20" rx="4"/><path d="M11 20l4-5 3 3 4-6"/></svg>
+      <span>rawgpu <b>Studio</b></span>
+    </div>
+    <div class="card-chip" id="card-chip" title="The GPU"></div>
+  </header>
+  <div class="layout">
+    <aside class="side">
+      <button class="btn primary wide" id="new-run" type="button">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>New run</button>
+      <div class="runs" id="runs"></div>
+    </aside>
+    <main class="main" id="main"></main>
+  </div>
+  <div class="toast" id="toast" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>
