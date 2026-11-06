@@ -676,6 +676,48 @@ def softplus(x): return _unary(x, U_SOFTPLUS)
 def abs(x): return _unary(x, U_ABS)  # noqa: A001
 
 
+# ------------------------------------------------------------------------------------------------- dropout
+
+_drop = [0x5EED, 0]  # the seed of the mask sequence, and how many masks it has given
+
+
+def manual_seed(seed):
+    """Restart dropout's sequence of masks from `seed` (each dropout call takes the next mask)."""
+    _drop[0], _drop[1] = int(seed) & 0xFFFFFFFF, 0
+
+
+def _next_seed():
+    s = (_drop[0] * 0x9E3779B1 + _drop[1] * 0x85EBCA77 + 0x165667B1) & 0xFFFFFFFF
+    _drop[1] += 1
+    return s
+
+
+def _dropout_into(x, y, p, seed, beta=0.0):
+    """y = beta * y + x with the mask of (p, seed) applied (y may be x)"""
+    cut = min(int(round(p * 2.0 ** 32)), 0xFFFFFFFF)
+    scale_ = 0.0 if p >= 1 else 1.0 / (1.0 - p)
+    _K("dropout")(x.arg, x.ld, y.arg, y.ld, x.rows, x.cols, cut, scale_, seed, float(beta), g=_grid(x.size), l=256)
+
+
+def dropout(x, p, seed=None):
+    """Inverted dropout: each element zeroed with probability p, the rest scaled by 1 / (1 - p), so the
+    expected value is unchanged and evaluation needs no rescaling. Applies whenever called: modules skip it
+    in eval mode. The mask is a hash of (seed, element) that the backward pass regenerates rather than
+    stores; `seed` defaults to the next of nn's sequence (manual_seed restarts it)."""
+    if not 0.0 <= p <= 1.0:
+        raise rawgpu.Error(f"dropout: p must be in [0, 1], got {p}")
+    if p == 0:
+        return x
+    seed = _next_seed() if seed is None else int(seed) & 0xFFFFFFFF
+    out = empty(x.shape)
+    _dropout_into(x, out, p, seed)
+
+    def back(g):
+        dx, beta = _target(x)
+        _dropout_into(g, dx, p, seed, beta)
+    return _node(out, (x,), back)
+
+
 def _binary(x, y, op, alpha=1.0, beta=1.0):
     mode = _bcast_mode(x, y)
     out = empty(x.shape)
@@ -1040,11 +1082,18 @@ def mse_loss(a, b):
 
 # ---------------------------------------------------------------------------------------------- attention
 
-def attention(q, k, v, batch, T, heads, kv_heads=None, causal=False, scale_=None, lens=None, window=0):
+def attention(q, k, v, batch, T, heads, kv_heads=None, causal=False, scale_=None, lens=None, window=0, dropout=0.0,
+              seed=None):
     """Multi-head attention. q [batch * T, heads * hd], k and v [batch * T, kv_heads * hd] (column views of a
     fused projection work). Query head h reads key/value head h / (heads / kv_heads). `lens`: each
     sequence's length (an int32 Tensor or array; keys past it are masked out); `window`: keys `window` or
-    more positions from the query are masked. Returns [batch * T, heads * hd]."""
+    more positions from the query are masked. `dropout`: the probability of dropping each attention
+    weight after the softmax (the mask is that of nn.dropout on the [batch * heads * T, T] weights).
+    Returns [batch * T, heads * hd]."""
+    if not 0.0 <= dropout < 1.0:
+        raise rawgpu.Error(f"attention: dropout must be in [0, 1), got {dropout}")
+    if dropout > 0:
+        seed = _next_seed() if seed is None else int(seed) & 0xFFFFFFFF
     kv_heads = kv_heads or heads
     hd = q.cols // heads
     group = heads // kv_heads
@@ -1061,8 +1110,12 @@ def attention(q, k, v, batch, T, heads, kv_heads=None, causal=False, scale_=None
                    g=(tiles(T), tiles(T), batch * heads), l=(16, 16, 1))
     _K("attn_softmax_fwd")(S.arg, sp, lens.arg if lens is not None else None, heads, T, float(scale_), int(causal),
                            int(window), g=batch * heads * T * 64, l=64)
+    P = S  # the weights the values are mixed with: S, or S with dropout (which backward regenerates)
+    if dropout > 0:
+        P = empty((batch * heads * T, T), ld=sp)
+        _dropout_into(S, P, dropout, seed)
     out = empty((batch * T, heads * hd))
-    _K("bgemm_nn")(S.arg, v.arg, out.arg, T, hd, T, sp, v.ld, out.ld, 1.0, 0.0, heads, group,
+    _K("bgemm_nn")(P.arg, v.arg, out.arg, T, hd, T, sp, v.ld, out.ld, 1.0, 0.0, heads, group,
                    heads * T * sp, T * sp, T * v.ld, hd, T * out.ld, hd,
                    g=(tiles(hd), tiles(T), batch * heads), l=(16, 16, 1))
 
@@ -1072,6 +1125,8 @@ def attention(q, k, v, batch, T, heads, kv_heads=None, causal=False, scale_=None
         _K("bgemm_nt")(g.arg, v.arg, dS.arg, T, T, hd, g.ld, v.ld, sp, 1.0, 0.0, heads, group,
                        T * g.ld, hd, T * v.ld, hd, heads * T * sp, T * sp,
                        g=(tiles(T), tiles(T), batch * heads), l=(16, 16, 1))
+        if dropout > 0:  # through the dropout: the same mask on the gradient
+            _dropout_into(dS, dS, dropout, seed)
         _K("attn_softmax_bwd")(S.arg, sp, dS.arg, sp, T, float(scale_), g=batch * heads * T * 64, l=64)
         if q.requires_grad:  # dQ = dS K
             dq, beta = _target(q)
@@ -1079,7 +1134,11 @@ def attention(q, k, v, batch, T, heads, kv_heads=None, causal=False, scale_=None
                            heads * T * sp, T * sp, T * k.ld, hd, T * dq.ld, hd,
                            g=(tiles(hd), tiles(T), batch * heads), l=(16, 16, 1))
         # dK = dS^T Q and dV = P^T dO, summed over the query heads that share each kv head
-        for src, other, dst_t in ((dS, q, k), (S, g, v)):
+        Pd = S
+        if dropout > 0 and v.requires_grad:
+            Pd = empty((batch * heads * T, T), ld=sp)
+            _dropout_into(S, Pd, dropout, seed)
+        for src, other, dst_t in ((dS, q, k), (Pd, g, v)):
             if not dst_t.requires_grad:
                 continue
             dst, beta = _target(dst_t)
@@ -1155,6 +1214,7 @@ def checkpoint(fn, inputs, params=()):
     of times its input's). `params`: the trainable tensors fn uses (so the gradient reaches them even when
     no input needs one)."""
     inputs = tuple(inputs)
+    drop = list(_drop)  # the recompute must draw the same dropout masks
     with no_grad():
         out = fn(*inputs)
 
@@ -1164,8 +1224,13 @@ def checkpoint(fn, inputs, params=()):
             d = x.detach()
             d.requires_grad = x.requires_grad
             ins.append(d)
-        with enable_grad():
-            o = fn(*ins)
+        now = list(_drop)
+        _drop[:] = drop
+        try:
+            with enable_grad():
+                o = fn(*ins)
+        finally:
+            _drop[:] = now
         if o.requires_grad:
             o.backward(g)
         for d, x in zip(ins, inputs):

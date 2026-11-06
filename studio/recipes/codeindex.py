@@ -56,6 +56,7 @@ class CodeIndex:
         rows = self.db.execute("SELECT c.path, c.project, c.start_line, c.end_line, c.tokens, f.size FROM chunks c "
                                "LEFT JOIN files f ON f.path = c.path ORDER BY c.id").fetchall()
         self.path = [r[0] for r in rows]
+        self.file = np.unique(np.array(self.path, object), return_inverse=True)[1]  # a file number per chunk
         self.project = np.array([r[1] for r in rows], object)
         self.tokens = np.array([r[4] for r in rows], np.int32)
         self.file_bytes = np.array([r[5] or 0 for r in rows], np.int64)
@@ -114,6 +115,28 @@ class CodeIndex:
             del enc
         db.close()
         return np.stack([found[k] for k in keys]).astype(np.float32)
+
+    def files_per(self, values):
+        """{value: how many distinct files have it} for a per-chunk label array"""
+        out = {}
+        for v in np.unique(values):
+            out[v] = int(len(np.unique(self.file[values == v])))
+        return out
+
+    def spread(self, idx, k, rng):
+        """k of the chunks idx, spread over their files: every file's first chunk (in a random order of
+        chunks), then every file's second, and so on, so a few long files can't fill the sample"""
+        idx = rng.permutation(np.asarray(idx))
+        if len(idx) <= k:
+            return idx
+        f = self.file[idx]
+        order = np.argsort(f, kind="stable")
+        fs = f[order]
+        new = np.r_[True, fs[1:] != fs[:-1]]
+        start = np.flatnonzero(new)
+        rank = np.empty(len(idx), np.int64)
+        rank[order] = np.arange(len(idx)) - start[np.cumsum(new) - 1]
+        return idx[np.lexsort((rng.random(len(idx)), rank))[:k]]
 
     def top(self, values, n, exclude=("Other",)):
         u, c = np.unique(values, return_counts=True)

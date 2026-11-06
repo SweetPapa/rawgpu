@@ -13,7 +13,7 @@ META = {
     "group": "From scratch",
     "tagline": "A byte-level language model trained on text you choose",
     "description": "A decoder-only transformer that reads bytes, so any text works without a tokenizer. "
-                   "By default it learns rawgpu's own source and docs (3.4 MB). Watch the validation loss "
+                   "By default it learns rawgpu's own source and docs (3.7 MB). Watch the validation loss "
                    "fall and the samples go from noise to plausible C and Markdown.",
     "params": [
         {"key": "corpus", "label": "Text", "type": "path", "default": "",
@@ -24,8 +24,13 @@ META = {
         {"key": "seq_len", "label": "Context", "type": "choice", "default": 256, "choices": [64, 128, 256, 512],
          "unit": "bytes"},
         {"key": "batch", "label": "Batch", "type": "int", "default": 32, "min": 1, "max": 256},
-        {"key": "steps", "label": "Steps", "type": "int", "default": 2000, "min": 10,
-         "help": "On the default 3.4 MB corpus, validation loss bottoms out near 2000 (later steps overfit)."},
+        {"key": "steps", "label": "Steps", "type": "int", "default": 3000, "min": 10,
+         "help": "On the default corpus, validation loss is still falling at 3000 with dropout 0.1; "
+                 "without dropout it bottoms out near 2000 and later steps overfit."},
+        {"key": "dropout", "label": "Dropout", "type": "float", "default": 0.1, "min": 0.0, "max": 0.9,
+         "help": "The chance of zeroing each embedding, attention weight and residual-branch output while "
+                 "training (GPT-2's places). It slows early learning and holds off overfitting: on the default "
+                 "corpus, 0.1 ends 3000 steps at 1.49 nats/byte against 1.57 without."},
         {"key": "lr", "label": "Learning rate", "type": "float", "default": 1e-3},
         {"key": "warmup", "label": "Warmup steps", "type": "int", "default": 100, "advanced": True},
         {"key": "weight_decay", "label": "Weight decay", "type": "float", "default": 0.1, "advanced": True},
@@ -86,7 +91,7 @@ def load_corpus(spec):
 def build(p):
     from rawgpu import nn
     return nn.GPT(256, dim=int(p["dim"]), heads=int(p["heads"]), layers=int(p["layers"]), seq_len=int(p["seq_len"]),
-                  seed=int(p.get("seed", 0)))
+                  seed=int(p.get("seed", 0)), dropout=float(p.get("dropout", 0.0)))
 
 
 def train(run):
@@ -96,6 +101,7 @@ def train(run):
     n_val = max(len(data) // 20, int(p["seq_len"]) * 64)
     train_d, val_d = data[:-n_val], data[-n_val:]
     rng = np.random.default_rng(int(p.get("seed", 0)))
+    nn.manual_seed(int(p.get("seed", 0)))
     model = build(p)
     B, T, total = int(p["batch"]), int(p["seq_len"]), int(p["steps"])
     opt = nn.AdamW(model.parameters(), lr=float(p["lr"]), betas=(0.9, 0.95), weight_decay=float(p["weight_decay"]),
@@ -119,9 +125,11 @@ def train(run):
 
     def evaluate():
         tot = 0.0
+        model.eval()  # no dropout
         with nn.no_grad():
             for i in range(0, len(vx), B):
                 tot += nn.cross_entropy(model(vx[i:i + B]), vy[i:i + B].reshape(-1)).item() * len(vx[i:i + B])
+        model.train()
         return tot / len(vx)
 
     acc, n_acc, t_log, best = None, 0, time.time(), float("inf")
@@ -165,7 +173,7 @@ def train(run):
 def try_it(run, req):
     """Continue a prompt with the best checkpoint"""
     from rawgpu import nn
-    model = build(run.params)
+    model = build(run.params).eval()
     name = "best" if os.path.exists(run.ckpt("best")) else "latest"
     run.load(name, model=model)
     prompt = (req.get("prompt") or "\n").encode()

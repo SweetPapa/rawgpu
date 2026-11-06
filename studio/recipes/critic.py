@@ -12,7 +12,9 @@ point), and the test split measures it: expected calibration error, Brier score,
 diagrams, before and after. Confidence is Jev's (J * p_max - 1) / (J - 1).
 
 Data: questions generated from your code index (the language, the kind of file, its size, whether it is
-a test), or a JSONL file of {"state", "question", "type", "options", "answer"} lines.
+a test), or a JSONL file of {"state", "question", "type", "options", "answer"} lines. The language
+question has every language the index has enough files of, sampled evenly (up to `per_language` chunks
+each, spread over their files) so the rare ones are learned too; the test results list each option.
 """
 import json
 import os
@@ -43,7 +45,13 @@ META = {
         {"key": "jsonl", "label": "JSONL file", "type": "path", "default": "",
          "help": 'One {"state", "question", "type": "choice"|"score"|"noul", "options": {name: description}, '
                  '"answer"} per line.'},
-        {"key": "per_question", "label": "Examples per question", "type": "int", "default": 2500, "min": 200},
+        {"key": "per_question", "label": "Examples per question", "type": "int", "default": 2500, "min": 200,
+         "help": "For the kind, size and test questions."},
+        {"key": "per_language", "label": "Examples per language", "type": "int", "default": 400, "min": 20,
+         "help": "The language question samples each language evenly, up to this many chunks."},
+        {"key": "min_files", "label": "Files a language needs", "type": "int", "default": 10, "min": 3,
+         "advanced": True, "help": "Languages with fewer files in the index are left out: the split is by "
+                                   "file, 80/10/10, so each needs a few to train and test on."},
         {"key": "dim", "label": "Joint space", "type": "choice", "default": 256, "choices": [64, 128, 256, 512]},
         {"key": "hidden", "label": "Hidden units", "type": "choice", "default": 512, "choices": [256, 512, 1024]},
         {"key": "steps", "label": "Steps", "type": "int", "default": 1500, "min": 10},
@@ -67,15 +75,48 @@ META = {
 
 NOUL = {"yes": "yes, it is", "no": "no, it is not"}
 
+# the language options' descriptions where the name alone is short, ambiguous or not a language
+LANG_DESC = {
+    "C": "the C programming language", "C++": "the C++ programming language", "C#": "the C# programming language",
+    "Objective-C": "the Objective-C programming language", "Go": "the Go programming language",
+    "R": "the R language for statistics", "Text": "plain text, not a programming language",
+    "Markdown": "prose formatted with Markdown", "JSON": "JSON data", "XML": "XML markup: plists, storyboards, "
+    "project files", "YAML": "YAML configuration", "TOML": "TOML configuration",
+    "INI": "INI-style settings: [sections] and key = value lines", "CSV": "comma-separated values",
+    "Shell": "shell scripts: sh, bash, zsh", "PowerShell": "Windows PowerShell scripts",
+    "Batch": "Windows batch files (.bat, .cmd)", "VBScript": "Visual Basic Script",
+    "NSIS": "NSIS scripts for Windows installers", "Make": "Makefiles", "CMake": "CMake build scripts",
+    "Gradle": "Gradle build scripts", "Dockerfile": "Dockerfiles that build container images",
+    "Terraform": "Terraform and HCL infrastructure as code", "OpenCL": "OpenCL C kernels for GPUs",
+    "Metal": "Apple's Metal shading language", "Shader": "GPU shaders: GLSL, HLSL, WGSL",
+    "Xojo": "the Xojo language (formerly REALbasic)", "Gettext": "translation catalogs (gettext .po files)",
+    "LaTeX": "LaTeX documents and macros", "Solidity": "Solidity smart contracts for Ethereum",
+    "Move": "the Move language for smart contracts", "GDScript": "GDScript for the Godot game engine",
+    "Vue": "Vue single-file components: template, script and style", "Svelte": "Svelte components",
+    "Linker script": "linker scripts that lay out memory sections",
+    "Xcode project": "Xcode project files (project.pbxproj)", "Fountain": "screenplays written in Fountain markup",
+    "Protobuf": "Protocol Buffers schema definitions", "GraphQL": "GraphQL schemas and queries",
+    "SQL": "SQL queries and schemas",
+}
 
-def code_questions(ci, n_per, rng):
-    """Questions about code chunks, answers from their paths: [(question, chunk indices, answer names)]"""
-    langs = ci.top(ci.lang, 10)
+
+def languages(ci, min_files):
+    """The index's languages with at least min_files files, most files first, and [(language, files)] of
+    the ones left out ("Other", unknown extensions, never counts)"""
+    n = ci.files_per(ci.lang)
+    ranked = sorted((l for l in n if l != "Other"), key=lambda l: -n[l])
+    return [l for l in ranked if n[l] >= min_files], [(l, n[l]) for l in ranked if n[l] < min_files]
+
+
+def code_questions(ci, n_per, rng, per_language=400, min_files=10):
+    """Questions about code chunks, answers from their paths: [(question, chunk indices, answer names)],
+    and the languages left out"""
+    langs, left = languages(ci, min_files)
     qs = [
         ({"id": "language", "type": "choice", "text": "What language is this written in?",
           "paraphrases": ["Which programming language is this?", "What is the language of this code?",
                           "Identify the language this snippet uses."],
-          "options": {l: f"code or text written in {l}" for l in langs}}, ci.lang),
+          "options": {l: LANG_DESC.get(l, f"code or text written in {l}") for l in langs}}, ci.lang),
         ({"id": "kind", "type": "choice", "text": "What kind of file is this part of?",
           "paraphrases": ["What sort of file does this come from?", "Is this code, tests, docs, config or build?",
                           "Classify the file this belongs to."], "options": KINDS}, ci.kind),
@@ -89,10 +130,13 @@ def code_questions(ci, n_per, rng):
     ]
     out = []
     for q, col in qs:
-        ok = np.flatnonzero(np.isin(col, list(q["options"])))
-        idx = rng.choice(ok, min(n_per, len(ok)), replace=False)
+        if q["id"] == "language":  # evenly: up to per_language of each, however rare
+            idx = np.concatenate([ci.spread(np.flatnonzero(col == l), per_language, rng) for l in langs])
+        else:
+            ok = np.flatnonzero(np.isin(col, list(q["options"])))
+            idx = rng.choice(ok, min(n_per, len(ok)), replace=False)
         out.append((q, idx, col[idx]))
-    return out
+    return out, left
 
 
 def load(run, rng):
@@ -124,7 +168,8 @@ def load(run, rng):
         what = f"{path}: {len(rows):,} examples, {len(questions)} questions"
     else:
         ci = CodeIndex(run.p("index"))
-        qs = code_questions(ci, int(run.p("per_question")), rng)
+        min_files = int(run.p("min_files", 10))
+        qs, left = code_questions(ci, int(run.p("per_question")), rng, int(run.p("per_language", 400)), min_files)
         questions = [q for q, _, _ in qs]
         allidx = np.unique(np.concatenate([idx for _, idx, _ in qs]))
         pos = {c: i for i, c in enumerate(allidx)}
@@ -133,7 +178,11 @@ def load(run, rng):
         ex = [(q["text"], pos[c], str(a)) for q, idx, ans in qs for c, a in zip(idx, ans)]
         split_keys = [ci.path[c] for c in allidx]
         what = (f"code index: {len(ex):,} examples about {len(allidx):,} chunks "
-                f"({'text only' if content else 'embedded with their paths'}), {len(questions)} questions")
+                f"({'text only' if content else 'embedded with their paths'}), {len(questions)} questions, "
+                f"{len(questions[0]['options'])} languages")
+        if left:
+            what += (f" (left out, under {min_files} files: "
+                     + ", ".join(f"{l} {n}" for l, n in left) + ")")
         enc = eg2_encoder()
     # the question and option embeddings
     # each question in its phrasings, each option as "name: description", the name, and the description:
@@ -225,8 +274,27 @@ def evaluate(lg, rows, data, T):
         J = len(cols)
         conf = ((J * pq.max(1) - 1) / (J - 1)).mean() if J > 1 else 1.0
         per.append(dict(id=q["id"], question=q["text"], type=q["type"], options=J, confidence=float(conf), reliability=rr,
-                        **r))
+                        by_option=by_option(pq, lab, [data["opt_names"][c] for c in cols]), **r))
     return overall, rel, per
+
+
+def by_option(p, lab, names):
+    """Each option's test examples, recall, precision, mean probability when right, and the option it was
+    most often mistaken for"""
+    pred = p.argmax(1)
+    out = []
+    for j, name in enumerate(names):
+        mine, said = lab == j, pred == j
+        n, hit = int(mine.sum()), int((mine & said).sum())
+        row = {"name": name, "n": n, "recall": hit / n if n else None,
+               "precision": hit / int(said.sum()) if said.any() else None,
+               "p_true": float(p[mine, j].mean()) if n else None, "confused": None}
+        miss = pred[mine & ~said]
+        if len(miss):
+            k = int(np.bincount(miss, minlength=len(names)).argmax())
+            row["confused"] = {"name": names[k], "share": float((miss == k).sum() / n)}
+        out.append(row)
+    return out
 
 
 def train(run):

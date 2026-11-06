@@ -155,6 +155,31 @@ __kernel void unary_bwd(__global const float *x, uint ldx, __global const float 
   dx[r * lddx + c] = acc(beta, dx + r * lddx + c) + g;
 }
 
+/* ---- dropout ---- */
+
+/* lowbias32 (Chris Wellons' integer hash): full avalanche in two multiplies */
+static inline uint hash32(uint x) {
+  x ^= x >> 16;
+  x *= 0x7feb352dU;
+  x ^= x >> 15;
+  x *= 0x846ca68bU;
+  x ^= x >> 16;
+  return x;
+}
+
+/* y = beta * y + x * keep * scale, keep = hash(seed, r * cols + c) >= cut: each element dropped with
+ * probability cut / 2^32. The mask is a function of the seed and the element's logical index (not of ld),
+ * so the backward pass is this kernel again on the gradient with the same seed, and nothing is stored.
+ * y may be x (in place, beta 0). */
+__kernel void dropout(__global const float *x, uint ldx, __global float *y, uint ldy, uint rows, uint cols, uint cut,
+                      float scale, uint seed, float beta) {
+  ELEM_INDEX
+  uint k = hash32(seed ^ 0x9e3779b9U);
+  uint h = hash32(hash32((uint)i + k) ^ seed);
+  float v = h >= cut ? x[r * ldx + c] * scale : 0.0f;
+  y[r * ldy + c] = acc(beta, y + r * ldy + c) + v;
+}
+
 /* z = beta_z * z + (op 0: alpha * x + beta * y; 1: alpha * x * y; 2: alpha * x / y), y broadcast by ymode
  * (as in broadcast()) */
 __kernel void binary(__global const float *x, uint ldx, __global const float *y, uint ldy, __global float *z, uint ldz,

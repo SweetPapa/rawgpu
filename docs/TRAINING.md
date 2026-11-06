@@ -42,16 +42,22 @@ print(loss.item())                            # reading a value waits for the GP
   - RMSNorm (also per head), LayerNorm and L2 normalization;
   - softmax, cross entropy (with ignored rows and label smoothing), BCE with logits, MSE;
   - multi-head attention: causal, padding masks, sliding windows, and grouped key/value heads;
-  - RoPE, embedding gathers (the backward is an atomic scatter-add), mean pooling, and concatenation.
+  - RoPE, embedding gathers (the backward is an atomic scatter-add), mean pooling, and concatenation;
+  - dropout, also on attention weights. The mask is a hash of a seed and each element's index, so the
+    backward pass regenerates it instead of storing it. `nn.manual_seed` restarts the sequence of seeds.
 - **Layers:**
-  - `Linear`, `Embedding`, `LayerNorm`, `RMSNorm` and `MLP`;
+  - `Linear`, `Embedding`, `LayerNorm`, `RMSNorm`, `Dropout` and `MLP`;
   - `SelfAttention`, `Block` and `Transformer`;
   - `GPT`, a small decoder with tied embeddings and sampling.
+  - `MLP`, `SelfAttention`, `Block`, `Transformer` and `GPT` take `dropout`. The transformer pieces
+    put it where GPT-2 does: on the embeddings, the attention weights, and each branch's output
+    before it joins the residual stream. Dropout applies only in training mode: `model.eval()`
+    turns it off, and `model.train()` back on.
 - **Optimizers:** `AdamW` and `SGD`, with the global gradient norm and clipping computed on the GPU:
   a step never waits for the host, and a non-finite gradient skips the step. There is also
   `cosine_lr`, and `ema_update` for moving-average weights.
 - **Memory:** `nn.checkpoint(fn, inputs, params)` recomputes `fn` in the backward pass instead of
-  keeping its activations.
+  keeping its activations. The recompute draws the same dropout masks as the forward pass.
 - **Checked:** `python/test_nn.py` runs every op on random inputs and compares the output and every
   gradient with PyTorch in float64. They agree to about 1e-7, AdamW over three clipped steps to 1e-7,
   and a tiny GPT learns a pattern.
@@ -73,7 +79,7 @@ How it stays fast enough:
 
 Limits:
 - **Precision:** float32 only. Polaris runs half precision no faster, so it would only save memory.
-- **Missing ops:** no convolutions and no dropout yet.
+- **Missing ops:** no convolutions yet.
 - **One program:** only one process at a time can use the card (Studio queues its runs).
 
 ## EmbeddingGemma 2 fine-tuning
@@ -121,9 +127,18 @@ Runs behave the same way across recipes:
 
 Every recipe at its defaults, run through Studio on the RX 590 (M4 Pro host):
 
-**Tiny GPT:** 4.8M parameters on this repo's 3.4 MB of source, at 45k bytes/s.
-- **Loss:** validation loss went from 2.34 to 1.56 nats/byte (2.25 bits/byte) by step 2,000, in about
-  6 minutes. Later steps overfit, rising to 1.59 at step 3,000.
+**Tiny GPT:** 4.8M parameters on this repo's 3.7 MB of source and docs.
+- **Loss:** the defaults (dropout 0.1, 3,000 steps) end at 1.49 nats/byte (2.14 bits/byte) in 10
+  minutes, at 41k bytes/s, and the loss is still falling.
+- **Dropout,** on the same corpus, seed and schedule:
+
+  | Validation loss (nats/byte) | Step 2,000 | Step 3,000 | Best |
+  |---|---|---|---|
+  | No dropout | 1.559 | 1.572 | 1.552 at step 2,250, then it overfits |
+  | Dropout 0.1 | 1.553 | 1.487 | 1.487 at step 3,000, still falling |
+  | Dropout 0.2 | 1.619 | 1.556 | 1.556 at step 3,000, still falling |
+
+  Dropout costs 9% of throughput (45k bytes/s without it).
 - **Samples:** they go from noise to plausible C (`PHM_PlatformCaps_ClockStretcher, /* indicates
   that ...`).
 
@@ -135,25 +150,41 @@ random actions (details below).
 - **Cosine baseline:** AUC 0.47–0.93.
 - **With paths:** the index's own vectors give AUC 0.97–1.00, which shows the leak described below.
 
-**Jev-style critic** (10,000 examples, text only): 82% accuracy overall.
+**Jev-style critic** (20,784 examples about 20,515 chunks, text only): 86% accuracy overall. The run
+took 17 minutes, nearly all of it embedding 18,001 chunks the cache didn't have yet; the 1,500 training
+steps take 13 seconds.
 
-| Question | Accuracy | Mean confidence |
-|---|---|---|
-| Language | 88% | 0.79 |
-| Kind of file | 87% | 0.85 |
-| File size (a Score) | 58% | 0.44 |
-| Is it a test | 96% | 0.85 |
+| Question | Options | Accuracy | Mean confidence |
+|---|---|---|---|
+| Language | 42 | 89% | 0.88 |
+| Kind of file | 5 | 91% | 0.91 |
+| File size (a Score) | 4 | 59% | 0.49 |
+| Is it a test | 2 | 92% | 0.88 |
 
-- **Calibration:** temperature scaling (T 1.54) took the test ECE from 0.048 to 0.033. A temperature
-  per question was tried and was no better (0.036); with about 250 validation examples per question it
-  overfits.
+- **Calibration:** temperature scaling (T 1.40) took the test ECE from 0.049 to 0.019. A temperature
+  per question was tried on an earlier run and was no better; with a few hundred validation examples
+  per question it overfits.
+- **Languages** (about 35 test examples each, fewer for the rare ones):
+  - 19 have perfect recall, including Rust, LaTeX, Solidity, Xojo, NSIS and linker scripts.
+  - C: recall 90%, precision 78%. Objective-C, OpenCL and C++ are called C 14%, 8% and 6% of the time.
+    Labels come from file extensions, so a `.h` header in a C++ or Objective-C project counts as C:
+    some of the confusion is in the labels.
+  - The weakest: Text (55%, read as Markdown), Python (58%), TypeScript and JavaScript (71% each,
+    mostly mistaken for each other), and HTML (67%, read as CSS). Make and INI have 1 and 3 test
+    examples, too few to say.
+- **Overfitting:** the training loss reaches 0.004 while the validation loss stays near 0.82, and
+  validation accuracy levels off at 87% early. The head memorizes its 16,000 training examples;
+  `nn.MLP`'s new dropout is the next thing to try.
 - **What generalizes:**
-  - New phrasings work. "Does this snippet check behavior with assertions?" gives 0.999 on a test
-    and 0.15 on plain code.
-  - Options it never trained on don't work. The language question learned the index's top 10, which
-    leaves out C, so C code comes out "Python".
-  - Documentation recall is 68%. Short prose about software often reads as source code. More
-    examples per question would help.
+  - New phrasings work. "Does this snippet check behavior with assertions?" gave 0.999 on a test
+    and 0.15 on plain code (measured on the earlier, 10-language run).
+  - C code now comes out C. A function from `src/main.c` gets C 0.72 and C++ 0.23; on the
+    10-language run, C was not an option and C code came out "Python".
+  - Options it never trained on still don't work. The language question covers every language with
+    at least 10 files in the index; the five with fewer (Lua, Ruby, Go, Metal, C#) are left out. A Go
+    HTTP handler comes out Rust at 0.65, and even offered "Go" as a new option, it gives Go 1.5%.
+  - Short prose about software often reads as source code: documentation recall is 72% (46 test
+    examples), with 22% called source code.
 
 **Fine-tuning EmbeddingGemma 2** (9,286 comment-to-code pairs from 3,809 files; top 4 layers, 22.4M
 parameters; 400 steps in 9 minutes at 5.5k tokens/s). Held-out retrieval among 500 documents:
@@ -224,7 +255,9 @@ question; it answers best near what it was trained on.
 is Jev's (J·p_max − 1)/(J − 1).
 
 The built-in data asks four questions about chunks of your code index:
-- what language it is in;
+- what language it is in, among every language the index has at least 10 files of (42 in this
+  index). Each language is sampled evenly, up to 400 chunks spread over its files, so rare languages
+  are learned too;
 - what kind of file it is part of;
 - how large that file is (a Score);
 - whether it is a test (yes or no).

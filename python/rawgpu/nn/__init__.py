@@ -16,6 +16,6 @@ in kernels.cl, each with its backward pass, checked against PyTorch by python/te
 """
 from .core import *  # noqa: F401,F403
 from .core import Context, Tensor, close, ctx, no_grad, pitch  # noqa: F401
-from .layers import (GPT, MLP, Block, Embedding, LayerNorm, Linear, Module, RMSNorm, SelfAttention,  # noqa: F401
-                     Transformer, rope_frequencies)
+from .layers import (GPT, MLP, Block, Dropout, Embedding, LayerNorm, Linear, Module, RMSNorm,  # noqa: F401
+                     SelfAttention, Transformer, rope_frequencies)
 from .optim import SGD, AdamW, copy_weights, cosine_lr, ema_update  # noqa: F401

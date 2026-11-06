@@ -2,6 +2,28 @@
 
 Dated, factual notes from real hardware. Newest first.
 
+## 2026-11-06: dropout, and the critic learns every language in the index
+
+**Dropout** (`nn.dropout`, `nn.Dropout`, and `dropout=` on `MLP`, `SelfAttention`, `Block`,
+`Transformer` and `GPT`):
+- **The mask** is a hash (lowbias32) of a seed and each element's logical index. The backward pass
+  regenerates it instead of storing it, and attention-weight dropout costs no memory between the
+  passes.
+- **Checkpointing** replays the forward pass's seeds. Without that, the recompute drew new masks, and
+  the gradients were off by up to 57.
+- **Checked by `test_nn.py`:** the keep rate is 0.7003 for p 0.3, masks are uncorrelated (|r| under
+  0.001 between neighbours, rows and seeds), and gradients, including attention's, match PyTorch with
+  the same mask.
+- **Tiny GPT,** same corpus and seed, 3,000 steps: dropout 0.1 ends at 1.487 nats/byte, still falling.
+  Without dropout the best is 1.552 at step 2,250, and it overfits to 1.572. Dropout 0.2 is still
+  catching up at 1.556. 0.1 and 3,000 steps are the recipe's defaults now.
+
+**The critic's language question** was the index's top 10 languages, which left out C. It is now
+every language with at least 10 files: 42 of them, sampled evenly (up to 400 chunks each, spread over
+their files). Language accuracy is 89% over 42 options, against 88% over 10. Overall accuracy rose
+from 82% to 86%, and the calibrated ECE fell from 0.033 to 0.019. C recall is 90%. Studio now shows
+each option's recall, precision and most common confusion.
+
 ## 2026-11-06: training on the card: rawgpu.nn, EmbeddingGemma 2 fine-tuning, and Studio
 
 **rawgpu.nn** (`python/rawgpu/nn/`) is reverse-mode autograd over new kernels (`kernels.cl`):

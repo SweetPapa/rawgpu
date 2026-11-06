@@ -773,9 +773,33 @@ const PANELS = {
     new LineChart(box, { series: [{ key: "a", label: "Calibrated" }, { key: "b", label: "Before", color: "--s2" }, { key: "d", label: "Perfect", dash: true, color: "--s3" }],
       height: 280, xDomain: [0, 1], yDomain: [0, 1], xName: "Confidence", xLabel: "confidence", fmt: ".2f", xfmt: (v) => fmt(v, ".2f") })
       .update({ a: pts(e.bins_after), b: pts(e.bins_before), d: [[0, 0], [1, 1]] });
-    const rows = e.questions.map((q) => h("tr", {}, h("td", {}, h("span", { class: "badge" }, q.type)), h("td", {}, q.question),
-      h("td", { class: "n" }, q.options), h("td", { class: "n" }, fmt(q.accuracy, ".1%")), h("td", { class: "n" }, fmt(q.confidence, ".2f")),
-      h("td", { class: "n" }, fmt(q.ece, ".3f")), h("td", { class: "n" }, fmt(q.brier, ".3f")), h("td", { class: "n" }, q.n.toLocaleString())));
+    // each option of the selected question (runs before per-option results have none: the box stays hidden)
+    const optBox = h("div", { class: "panel", style: "margin-top:12px" });
+    const showOpts = (q) => {
+      const opts = (q.by_option || []).slice().sort((a, b) => (b.recall ?? -1) - (a.recall ?? -1) || b.n - a.n);
+      optBox.hidden = !opts.length;
+      optBox.replaceChildren(h("div", { class: "chart-head" }, h("h3", {}, q.question), h("span", { class: "unit" }, `${q.options} options, test split`)),
+        h("div", { style: "max-height:460px;overflow:auto" }, h("table", { class: "t" },
+          h("thead", {}, h("tr", {}, h("th", {}, "Option"), h("th", { class: "n" }, "Examples"), h("th", {}, "Recall"), h("th", { class: "n" }, "Precision"),
+            h("th", {}, "Most often mistaken for"))),
+          h("tbody", {}, opts.map((o) => h("tr", {},
+            h("td", {}, h("b", {}, o.name)),
+            h("td", { class: "n" }, o.n.toLocaleString()),
+            h("td", { class: "nw" }, o.recall == null ? h("span", { class: "faint" }, "none in the test split") : [h("span", { class: "hbar", style: `width:${o.recall * 90}px` }), fmt(o.recall, ".0%")]),
+            h("td", { class: "n" }, o.precision == null ? h("span", { class: "faint" }, "never picked") : fmt(o.precision, ".0%")),
+            h("td", {}, o.confused ? [o.confused.name, h("span", { class: "faint" }, ` ${fmt(o.confused.share, ".0%")}`)] : h("span", { class: "faint" }, "—"))))))),
+        h("div", { class: "faint", style: "font-size:11.5px;margin-top:8px" }, "Recall: of the test examples with this answer, the share the critic chose it for. Precision: of the times it chose this option, the share that were right. With few examples, these are rough."));
+    };
+    const tb = h("tbody");
+    const first = e.questions.reduce((a, q) => (q.options > (a ? a.options : 0) ? q : a), null);
+    e.questions.forEach((q) => {
+      const tr = h("tr", { class: "pick" + (q === first ? " sel" : ""), onclick: () => { tb.querySelectorAll("tr").forEach((x) => x.classList.remove("sel")); tr.classList.add("sel"); showOpts(q); } },
+        h("td", {}, h("span", { class: "badge" }, q.type)), h("td", {}, q.question),
+        h("td", { class: "n" }, q.options), h("td", { class: "n" }, fmt(q.accuracy, ".1%")), h("td", { class: "n" }, fmt(q.confidence, ".2f")),
+        h("td", { class: "n" }, fmt(q.ece, ".3f")), h("td", { class: "n" }, fmt(q.brier, ".3f")), h("td", { class: "n" }, q.n.toLocaleString()));
+      tb.append(tr);
+    });
+    if (first) showOpts(first);
     return section("Calibration", `test split, temperature ${fmt(e.temperature, ".2f")} fit on the validation split`,
       h("div", { class: "two" },
         h("div", { style: "display:grid;gap:12px;align-content:start" },
@@ -788,8 +812,9 @@ const PANELS = {
         box),
       h("div", { class: "panel", style: "overflow:auto;margin-top:12px" }, h("table", { class: "t" },
         h("thead", {}, h("tr", {}, h("th", {}, "Type"), h("th", {}, "Question"), h("th", { class: "n" }, "Options"), h("th", { class: "n" }, "Accuracy"),
-          h("th", { class: "n" }, "Confidence"), h("th", { class: "n" }, "ECE"), h("th", { class: "n" }, "Brier"), h("th", { class: "n" }, "Examples"))), h("tbody", {}, rows)),
-        h("div", { class: "faint", style: "font-size:11.5px;margin-top:8px" }, "Confidence is Jev's: (J × p_max − 1) / (J − 1) for J options, 0 for an even spread, 1 for certainty.")));
+          h("th", { class: "n" }, "Confidence"), h("th", { class: "n" }, "ECE"), h("th", { class: "n" }, "Brier"), h("th", { class: "n" }, "Examples"))), tb),
+        h("div", { class: "faint", style: "font-size:11.5px;margin-top:8px" }, "Confidence is Jev's: (J × p_max − 1) / (J − 1) for J options, 0 for an even spread, 1 for certainty. Click a question for its options.")),
+      optBox);
   },
 
   retrieval() {
@@ -821,6 +846,15 @@ function buildPlayground() {
     out.replaceChildren(h("div", { class: "faint" }, "Running on the card…"));
     try { render(await api(`/api/runs/${R.id}/try`, req)); } catch (e) { out.replaceChildren(h("div", { class: "banner critical" }, icon("alert"), h("div", { class: "txt" }, e.message))); }
     go.disabled = false;
+  };
+  // a score question keeps its scale's order; a long choice list shows its likeliest options
+  const longProbs = (r) => {
+    let items = r.options.map((x) => ({ name: x.name, p: x.probability }));
+    if (r.type === "score" || items.length <= 10) return [probRows(items, r.choice)];
+    items = items.sort((a, b) => b.p - a.p);
+    const rest = items.slice(8).reduce((t, x) => t + x.p, 0);
+    return [probRows(items.slice(0, 8), r.choice),
+      h("div", { class: "faint", style: "margin-top:6px;font-size:11.5px" }, `${items.length - 8} more options, ${fmt(rest, ".0%")} together`)];
   };
   const probRows = (items, top) => h("div", { class: "probs" }, items.map((it) => h("div", { class: "row" + (it.name === top ? " top" : "") },
     h("span", { class: "nm", title: it.name }, it.name), h("span", { class: "tr" }, h("i", { style: `width:${it.p * 100}%` })), h("span", { class: "pv" }, fmt(it.p, ".0%")))));
@@ -867,7 +901,7 @@ function buildPlayground() {
           h("div", { class: "tile" }, h("div", { class: "k" }, r.type === "noul" ? "P(yes)" : "Choice"), h("div", { class: "v" }, r.type === "noul" ? fmt(r.probability_yes, ".0%") : r.choice)),
           h("div", { class: "tile" }, h("div", { class: "k" }, "Confidence"), h("div", { class: "v" }, fmt(r.confidence, ".2f"))),
           r.position !== undefined ? h("div", { class: "tile" }, h("div", { class: "k" }, "Score position"), h("div", { class: "v" }, fmt(r.position, ".2f"), h("span", { class: "u" }, `of ${r.options.length - 1}`))) : null),
-        probRows(r.options.map((x) => ({ name: x.name, p: x.probability })), r.choice)));
+        ...longProbs(r)));
     };
     box.append(h("div", { class: "panel" }, h("div", { class: "form" }, h("div", { class: "field wide" }, h("label", {}, "State"), state),
       h("div", { class: "field wide" }, h("label", {}, "Question"), pick)), custom, h("div", { class: "form-foot" }, go), out));

@@ -63,7 +63,7 @@ def check(name, ours, ref, inputs, tol=3e-4, grad_inputs=None):
         FAILED.append(name)
 
 
-def attn_ref(q, k, v, B, T, H, KV, causal, scale, lens=None, window=0):
+def attn_ref(q, k, v, B, T, H, KV, causal, scale, lens=None, window=0, drop=None):
     hd = q.shape[1] // H
     q = q.view(B, T, H, hd).transpose(1, 2)
     k = k.view(B, T, KV, hd).transpose(1, 2).repeat_interleave(H // KV, dim=1)
@@ -81,7 +81,91 @@ def attn_ref(q, k, v, B, T, H, KV, causal, scale, lens=None, window=0):
         m &= (j[None, None] < torch.as_tensor(lens).view(B, 1, 1, 1))
     s = s.masked_fill(~m, float("-inf"))
     p = torch.nan_to_num(torch.softmax(s, -1), nan=0.0)
+    if drop is not None:  # [B * H * T, T]: the kept weights' scale, 0 where dropped
+        p = p * torch.as_tensor(drop, dtype=torch.float64).view(B, H, T, T)
     return (p @ v).transpose(1, 2).reshape(B * T, H * hd)
+
+
+def mask_of(shape, p, seed):
+    """The multiplier nn.dropout applies with this seed: 1 / (1 - p) where kept, 0 where dropped"""
+    return nn.dropout(nn.ones(shape), p, seed=seed).numpy()
+
+
+def report(name, ok, text):
+    print(f"  {'ok  ' if ok else 'FAIL'} {name:<38} {text}")
+    if not ok:
+        FAILED.append(name)
+
+
+def dropout_checks():
+    print("dropout")
+    p = 0.3
+    m = mask_of((777, 1283), p, 7)
+    kept = m != 0
+    frac = kept.mean()
+    vals = np.unique(m[kept])
+    report("dropout keeps 1 - p, scaled 1/(1-p)", abs(frac - (1 - p)) < 0.003 and len(vals) == 1 and
+           abs(vals[0] - 1 / (1 - p)) < 1e-6, f"kept {frac:.4f} (want {1 - p}), value {vals[0]:.6f}")
+    a, b = kept[:, :-1].reshape(-1).astype(np.float64), kept[:, 1:].reshape(-1).astype(np.float64)
+    c_next = abs(np.corrcoef(a, b)[0, 1])
+    c_seed = abs(np.corrcoef(kept.reshape(-1), (mask_of((777, 1283), p, 8) != 0).reshape(-1))[0, 1])
+    c_row = abs(np.corrcoef(kept[:-1].reshape(-1), kept[1:].reshape(-1))[0, 1])
+    report("masks uncorrelated", max(c_next, c_seed, c_row) < 0.005,
+           f"next element {c_next:.4f}, next row {c_row:.4f}, next seed {c_seed:.4f}")
+    # the mask follows the logical index, not the row pitch: a column view (ld > cols) gets the same one
+    x = r(300, 64 * 5)                       # padded pitch
+    big = nn.tensor(np.concatenate([x, r(300, 7)], 1))
+    view = nn.slice_cols(big, 0, 320)
+    same = np.array_equal(nn.dropout(view, 0.5, seed=3).numpy(), nn.dropout(nn.tensor(x), 0.5, seed=3).numpy())
+    report("mask independent of the row pitch", same, f"ld {view.ld} vs {nn.tensor(x).ld}")
+    nn.manual_seed(11)
+    d1, d2 = nn.dropout(nn.ones((64, 64)), 0.5).numpy(), nn.dropout(nn.ones((64, 64)), 0.5).numpy()
+    nn.manual_seed(11)
+    d3 = nn.dropout(nn.ones((64, 64)), 0.5).numpy()
+    report("seed sequence, manual_seed", not np.array_equal(d1, d2) and np.array_equal(d1, d3),
+           "successive calls differ, a restart repeats")
+    for shape, q in (((37, 130), 0.1), ((128, 256), 0.5), ((5, 3), 0.9)):
+        M = mask_of(shape, q, 21)
+        check(f"dropout {shape[0]}x{shape[1]} p={q}", lambda a, q=q: nn.dropout(a, q, seed=21),
+              lambda a, M=M: a * torch.as_tensor(M, dtype=torch.float64), [r(*shape)])
+    report("dropout p=0 is the identity", nn.dropout(big, 0.0) is big, "returns its input")
+
+    # attention-weight dropout: torch applies the same mask (read back from nn.dropout) after the softmax
+    for (B, T, H, KV, hd, causal, lens) in [(2, 40, 4, 4, 32, True, None), (2, 70, 4, 2, 32, False, [70, 33])]:
+        D, Dk = H * hd, KV * hd
+        M = mask_of((B * H * T, T), 0.2, 99)
+        check(f"attention dropout B{B} T{T} H{H}/{KV}{' causal' if causal else ''}{' lens' if lens else ''}",
+              lambda a, B=B, T=T, H=H, KV=KV, D=D, Dk=Dk, causal=causal, lens=lens:
+              nn.attention(nn.slice_cols(a, 0, D), nn.slice_cols(a, D, D + Dk), nn.slice_cols(a, D + Dk, D + 2 * Dk),
+                           B, T, H, KV, causal, 1 / np.sqrt(hd), lens, dropout=0.2, seed=99),
+              lambda a, B=B, T=T, H=H, KV=KV, D=D, Dk=Dk, causal=causal, lens=lens, M=M:
+              attn_ref(a[:, :D], a[:, D:D + Dk], a[:, D + Dk:], B, T, H, KV, causal, 1 / np.sqrt(hd), lens, drop=M),
+              [r(B * T, D + 2 * Dk)], tol=5e-4)
+
+    # a checkpointed block recomputes with the same masks it drew in the forward pass
+    x0, w0, R = r(48, 96), r(96, 96), r(48, 96)
+
+    def f(x, w):
+        return nn.dropout(nn.gelu(nn.dropout(nn.linear(x, w), 0.4)), 0.3)
+    grads = []
+    for ck in (False, True):
+        nn.manual_seed(5)
+        x, w = nn.tensor(x0, requires_grad=True), nn.tensor(w0, requires_grad=True)
+        y = nn.checkpoint(f, [x, w]) if ck else f(x, w)
+        y2 = nn.dropout(y, 0.5)  # a draw after the checkpoint: the recompute must not shift it
+        nn.sum_all(nn.mul(y2, nn.tensor(R))).backward()
+        grads.append((y2.numpy(), x.grad.numpy(), w.grad.numpy()))
+    e = max(rel_err(a, b) for a, b in zip(*grads))
+    report("checkpoint replays dropout masks", e < 1e-6, f"checkpointed vs not {e:.1e}")
+
+    model = nn.GPT(vocab=64, dim=64, heads=2, layers=2, seq_len=16, seed=2, dropout=0.3)
+    ids = (np.arange(16 * 4) % 64).reshape(4, 16)
+    t1, t2 = model(ids).numpy(), model(ids).numpy()
+    model.eval()
+    e1, e2 = model(ids).numpy(), model(ids).numpy()
+    model.train()
+    report("eval mode turns dropout off", not np.array_equal(t1, t2) and np.array_equal(e1, e2),
+           "training passes differ, eval passes repeat")
 
 
 def rope_ref(x, freq, T, groups):
@@ -229,6 +313,8 @@ def main():
         m = (torch.arange(9)[None, :] < torch.as_tensor(lens)[:, None]).double()[..., None]
         return (a * m).sum(1) / torch.as_tensor(lens).double()[:, None]
     check("pool_mean", lambda a: nn.pool_mean(a, lens, 4, 9), pool_ref, [r(36, 200)])
+
+    dropout_checks()
 
     print("optimizer")
     w0, g0 = r(130, 70), r(130, 70)

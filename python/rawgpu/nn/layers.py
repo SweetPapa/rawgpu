@@ -148,17 +148,30 @@ class RMSNorm(Module):
         return F.rmsnorm(x, self.weight, self.eps)
 
 
+class Dropout(Module):
+    """Zeroes each element with probability p while training (scaling the rest by 1 / (1 - p)); the
+    identity in eval mode"""
+
+    def __init__(self, p=0.1):
+        self.p = float(p)
+
+    def forward(self, x):
+        return F.dropout(x, self.p) if self.training and self.p > 0 else x
+
+
 ACTS = {"relu": F.relu, "gelu": F.gelu, "silu": F.silu, "tanh": F.tanh, "none": lambda x: x}
 
 
 class MLP(Module):
-    """Linear layers with an activation between them (and LayerNorm, with norm=True)"""
+    """Linear layers with an activation between them (and LayerNorm, with norm=True; dropout after each
+    hidden activation, while training)"""
 
-    def __init__(self, sizes, act="gelu", norm=False, rng=None, final_act=False):
+    def __init__(self, sizes, act="gelu", norm=False, rng=None, final_act=False, dropout=0.0):
         rng = rng or np.random.default_rng()
         self.layers = [Linear(a, b, rng=rng) for a, b in zip(sizes[:-1], sizes[1:])]
         self.norms = [LayerNorm(b) for b in sizes[1:-1]] if norm else []
         self.act, self.final_act = act, final_act
+        self.drop = Dropout(dropout)
 
     def forward(self, x):
         n = len(self.layers)
@@ -167,7 +180,7 @@ class MLP(Module):
             if i < n - 1:
                 if self.norms:
                     x = self.norms[i](x)
-                x = ACTS[self.act](x)
+                x = self.drop(ACTS[self.act](x))
             elif self.final_act:
                 x = ACTS[self.act](x)
         return x
@@ -178,11 +191,12 @@ def rope_frequencies(hd, theta=10000.0):
 
 
 class SelfAttention(Module):
-    """Multi-head self-attention over [batch * T, dim], one fused q/k/v projection, rotary positions"""
+    """Multi-head self-attention over [batch * T, dim], one fused q/k/v projection, rotary positions.
+    `dropout` (while training): on the attention weights and on the output projection, as in GPT-2."""
 
-    def __init__(self, dim, heads, causal=True, rng=None, rope=True, out_std=None):
+    def __init__(self, dim, heads, causal=True, rng=None, rope=True, out_std=None, dropout=0.0):
         rng = rng or np.random.default_rng()
-        self.heads, self.dim, self.causal = heads, dim, causal
+        self.heads, self.dim, self.causal, self.dropout = heads, dim, causal, float(dropout)
         self.hd = dim // heads
         self.qkv = Linear(dim, 3 * dim, bias=False, rng=rng)
         self.proj = Linear(dim, dim, bias=False, rng=rng, std=out_std)
@@ -194,32 +208,35 @@ class SelfAttention(Module):
         q, k, v = F.slice_cols(qkv, 0, D), F.slice_cols(qkv, D, 2 * D), F.slice_cols(qkv, 2 * D, 3 * D)
         if self._freq is not None:
             q, k = F.rope(q, self._freq, T, self.heads), F.rope(k, self._freq, T, self.heads)
-        a = F.attention(q, k, v, batch, T, self.heads, causal=self.causal, lens=lens)
-        return self.proj(a)
+        p = self.dropout if self.training else 0.0
+        a = F.attention(q, k, v, batch, T, self.heads, causal=self.causal, lens=lens, dropout=p)
+        return F.dropout(self.proj(a), p)
 
 
 class Block(Module):
-    """A pre-norm transformer block: x + attn(norm(x)), then x + mlp(norm(x))"""
+    """A pre-norm transformer block: x + attn(norm(x)), then x + mlp(norm(x)); `dropout` on the attention
+    weights and on each branch's output before it joins the residual stream"""
 
-    def __init__(self, dim, heads, mlp_ratio=4, causal=True, rng=None, n_layers=1):
+    def __init__(self, dim, heads, mlp_ratio=4, causal=True, rng=None, n_layers=1, dropout=0.0):
         rng = rng or np.random.default_rng()
         out_std = 1.0 / math.sqrt(dim) / math.sqrt(2 * n_layers)  # GPT-2's scaled residual projections
         self.ln1, self.ln2 = LayerNorm(dim), LayerNorm(dim)
-        self.attn = SelfAttention(dim, heads, causal, rng, out_std=out_std)
+        self.attn = SelfAttention(dim, heads, causal, rng, out_std=out_std, dropout=dropout)
         self.fc = Linear(dim, mlp_ratio * dim, rng=rng)
         self.out = Linear(mlp_ratio * dim, dim, rng=rng, std=out_std / math.sqrt(mlp_ratio))
+        self.drop = Dropout(dropout)
 
     def forward(self, x, batch, T, lens=None):
         x = x + self.attn(self.ln1(x), batch, T, lens)
-        return x + self.out(F.gelu(self.fc(self.ln2(x))))
+        return x + self.drop(self.out(F.gelu(self.fc(self.ln2(x)))))
 
 
 class Transformer(Module):
     """A stack of blocks over token ids or vectors, with a final LayerNorm"""
 
-    def __init__(self, dim, heads, layers, causal=True, mlp_ratio=4, rng=None):
+    def __init__(self, dim, heads, layers, causal=True, mlp_ratio=4, rng=None, dropout=0.0):
         rng = rng or np.random.default_rng()
-        self.blocks = [Block(dim, heads, mlp_ratio, causal, rng, layers) for _ in range(layers)]
+        self.blocks = [Block(dim, heads, mlp_ratio, causal, rng, layers, dropout) for _ in range(layers)]
         self.ln_f = LayerNorm(dim)
 
     def forward(self, x, batch, T, lens=None):
@@ -229,33 +246,41 @@ class Transformer(Module):
 
 
 class GPT(Module):
-    """A small decoder-only language model over a byte or token vocabulary, the head tied to the embedding"""
+    """A small decoder-only language model over a byte or token vocabulary, the head tied to the embedding.
+    `dropout` (while training): on the embeddings, the attention weights and each block's branches."""
 
-    def __init__(self, vocab, dim=256, heads=4, layers=4, seq_len=256, seed=0):
+    def __init__(self, vocab, dim=256, heads=4, layers=4, seq_len=256, seed=0, dropout=0.0):
         rng = np.random.default_rng(seed)
         self.vocab, self.dim, self.seq_len = vocab, dim, seq_len
         self.tok = Embedding(vocab, dim, rng)
-        self.body = Transformer(dim, heads, layers, True, rng=rng)
+        self.drop = Dropout(dropout)
+        self.body = Transformer(dim, heads, layers, True, rng=rng, dropout=dropout)
 
     def forward(self, ids):
         """ids [batch, T] -> logits [batch * T, vocab]"""
         ids = np.asarray(ids)
         B, T = ids.shape
-        h = self.body(self.tok(ids), B, T)
+        h = self.body(self.drop(self.tok(ids)), B, T)
         return F.matmul(h, self.tok.weight, tb=True)
 
     def generate(self, prompt_ids, n, temperature=0.8, top_k=40, rng=None):
+        """Sample n more ids after the prompt (in eval mode: no dropout)"""
         rng = rng or np.random.default_rng()
         ids = list(prompt_ids)
-        with F.no_grad():
-            for _ in range(n):
-                ctx = ids[-self.seq_len:]
-                logits = self.forward(np.array([ctx])).numpy()[-1].astype(np.float64)
-                logits /= max(temperature, 1e-4)
-                if top_k:
-                    cut = np.sort(logits)[-min(top_k, len(logits))]
-                    logits[logits < cut] = -np.inf
-                p = np.exp(logits - logits.max())
-                p /= p.sum()
-                ids.append(int(rng.choice(len(p), p=p)))
+        was = self.training
+        self.eval()
+        try:
+            with F.no_grad():
+                for _ in range(n):
+                    ctx = ids[-self.seq_len:]
+                    logits = self.forward(np.array([ctx])).numpy()[-1].astype(np.float64)
+                    logits /= max(temperature, 1e-4)
+                    if top_k:
+                        cut = np.sort(logits)[-min(top_k, len(logits))]
+                        logits[logits < cut] = -np.inf
+                    p = np.exp(logits - logits.max())
+                    p /= p.sum()
+                    ids.append(int(rng.choice(len(p), p=p)))
+        finally:
+            self.train(was)
         return ids
