@@ -8,6 +8,8 @@ recipes and shows them as they go.
 tools/studio.sh                       # http://127.0.0.1:8765, opened in the browser
 ```
 
+The menu bar app's **Studio** button does the same, in a checkout build.
+
 Studio needs a Python with numpy. The EmbeddingGemma 2 recipes also need `tokenizers` and
 `huggingface_hub`; this checkout's `local/eg2-venv` has all three
 ([models/embeddinggemma2/README.md](../models/embeddinggemma2/README.md) sets it up), and
@@ -114,6 +116,56 @@ Runs behave the same way across recipes:
 - **Stop** saves a checkpoint, and **Resume** continues from it.
 - A run pauses while the card is at its temperature limit (85 °C by default).
 - **Try it** runs a finished model on your input (GPT, probes, critic).
+
+### Measured
+
+Every recipe at its defaults, run through Studio on the RX 590 (M4 Pro host):
+
+**Tiny GPT:** 4.8M parameters on this repo's 3.4 MB of source, at 45k bytes/s.
+- **Loss:** validation loss went from 2.34 to 1.56 nats/byte (2.25 bits/byte) by step 2,000, in about
+  6 minutes. Later steps overfit, rising to 1.59 at step 3,000.
+- **Samples:** they go from noise to plausible C (`PHM_PlatformCaps_ClockStretcher, /* indicates
+  that ...`).
+
+**JEPA world model:** 4,000 steps in 4.5 minutes. The planner reaches 53% of goals, against 5% for
+random actions (details below).
+
+**Salience probes** (file kinds; 10,000 chunks, text only):
+- **Probe:** AUC 0.93–0.98, F1 0.71–0.91, calibration error about 0.03.
+- **Cosine baseline:** AUC 0.47–0.93.
+- **With paths:** the index's own vectors give AUC 0.97–1.00, which shows the leak described below.
+
+**Jev-style critic** (10,000 examples, text only): 82% accuracy overall.
+
+| Question | Accuracy | Mean confidence |
+|---|---|---|
+| Language | 88% | 0.79 |
+| Kind of file | 87% | 0.85 |
+| File size (a Score) | 58% | 0.44 |
+| Is it a test | 96% | 0.85 |
+
+- **Calibration:** temperature scaling (T 1.54) took the test ECE from 0.048 to 0.033. A temperature
+  per question was tried and was no better (0.036); with about 250 validation examples per question it
+  overfits.
+- **What generalizes:**
+  - New phrasings work. "Does this snippet check behavior with assertions?" gives 0.999 on a test
+    and 0.15 on plain code.
+  - Options it never trained on don't work. The language question learned the index's top 10, which
+    leaves out C, so C code comes out "Python".
+  - Documentation recall is 68%. Short prose about software often reads as source code. More
+    examples per question would help.
+
+**Fine-tuning EmbeddingGemma 2** (9,286 comment-to-code pairs from 3,809 files; top 4 layers, 22.4M
+parameters; 400 steps in 9 minutes at 5.5k tokens/s). Held-out retrieval among 500 documents:
+
+| | Before | After |
+|---|---|---|
+| Recall@1 | 67.8% | 73.4% |
+| Recall@5 | 85.2% | 92.6% |
+| Recall@10 | 90.2% | 95.2% |
+| MRR | 0.760 | 0.817 |
+
+The exported model, loaded back with eg2.py, reproduces the trained one to cosine 1.000000.
 
 ### The JEPA world model
 

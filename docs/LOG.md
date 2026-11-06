@@ -2,6 +2,48 @@
 
 Dated, factual notes from real hardware. Newest first.
 
+## 2026-11-06: training on the card: rawgpu.nn, EmbeddingGemma 2 fine-tuning, and Studio
+
+**rawgpu.nn** (`python/rawgpu/nn/`) is reverse-mode autograd over new kernels (`kernels.cl`):
+- **Products:** all four transposes, plus batched products with grouped heads for attention.
+- **Element-wise ops** with broadcasting, and reductions.
+- **Normalization:** RMSNorm, also per head; LayerNorm; L2 normalization.
+- **Losses:** softmax, cross entropy, BCE.
+- **Attention:** causal masks, padding, windows, and grouped KV heads.
+- **Positions and gathers:** RoPE, and gathers whose backward is a compare-and-swap scatter-add (no
+  float atomics on Polaris).
+- **Optimizers:** AdamW and SGD, with the gradient norm and clipping on the GPU, and EMA.
+
+`python/test_nn.py` checks every op's output and gradients against PyTorch in float64. They agree to
+about 1e-7.
+
+**What the hardware path forced:**
+- **The VRAM allocator:** it aligns each buffer to 64 KB and tracks 256 free extents. A training step
+  allocates thousands of small tensors and ran out of extents with 7 GB free. rawgpu.nn now takes
+  256 MB chunks and carves them itself, reusing blocks by size; in-order launches make reuse safe.
+- **The GART window:** the GPU reaches host memory through a small window. The upload ring grew a host
+  buffer per large upload and failed with -28 at 50 MB, so it now has fixed 8 MB slots and splits
+  bigger uploads into them.
+- **Transfers wait:** a blocking write waits for every queued launch, so per-step data goes through the
+  ring instead. A step then has no round trips to the host.
+
+**EmbeddingGemma 2 fine-tuning** (`eg2_train.py`):
+- **Memory:** without checkpointing, activations cost about 2 MB per token, and a 3,600-token batch
+  needed more than 8 GB. With each layer checkpointed, it peaked at 2.3 GB.
+- **Checked by `check_train.py`:** embeddings match `eg2.py` and sentence-transformers to cosine
+  1.000000. Gradients match PyTorch's for all 388 weights, with a median relative difference of 7e-6.
+- **Speed:** forward and backward took 1.8 s on the card, against 8.4 s on the CPU.
+
+**Studio** (`studio/`, `tools/studio.sh`) is a local web app. It has five recipes; docs/TRAINING.md
+has their measured results. Two findings:
+- **JEPA dropped the agent.** Without an inverse-dynamics loss, the world model's latents kept the
+  bouncing ball and lost the agent the actions move, at 10 px probe error (about chance), so the
+  planner never reached a goal. At weight 1.0 they lost the ball instead. At 0.3, with a 128-dim
+  latent, both decode, and the planner reaches 53% of goals against 5% for random actions.
+- **The code index leaks its labels.** It embedded `title: <project/path> | text: <chunk>`, and the
+  built-in probe and critic labels come from paths. A path-free re-embedding (cached) is the default
+  now. It lowered the probe AUC from 0.97–1.00 to 0.93–0.98, which is the honest number.
+
 ## 2026-11-05: ready to publish: MIT, signed and notarized releases, `rawgpu doctor`
 
 **The audit before going public:**
