@@ -229,6 +229,7 @@ table.t th { text-align: left; font-weight: 600; font-size: 11.5px; color: var(-
 table.t td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 table.t tr:last-child td { border-bottom: none; }
 table.t td.n, table.t th.n { text-align: right; }
+table.t td.nw { white-space: nowrap; }
 table.t tr.pick { cursor: pointer; }
 table.t tr.pick:hover td, table.t tr.sel td { background: var(--surface-2); }
 .hbar { display: inline-block; height: 7px; border-radius: 4px; background: var(--s1); vertical-align: middle; margin-right: 6px; }

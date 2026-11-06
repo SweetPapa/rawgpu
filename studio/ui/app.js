@@ -524,7 +524,7 @@ function buildRun() {
   const kv = h("dl", { class: "kv" });
   for (const p of meta.params) {
     const v = R.config.params[p.key];
-    kv.append(h("dt", {}, p.label), h("dd", {}, v === "" ? "–" : String(v) + (p.unit ? " " + p.unit : "")));
+    kv.append(h("dt", {}, p.label), h("dd", {}, v === "" || v === undefined || v === null ? "–" : String(v) + (p.unit ? " " + p.unit : "")));
   }
   const logBox = h("div", { class: "log" }, "…");
   const logDet = h("details", {}, h("summary", { style: "cursor:pointer;color:var(--text-2);font-weight:550" }, "Log"), logBox);
@@ -749,19 +749,20 @@ const PANELS = {
       const tr = h("tr", { class: "pick" + (i === 0 ? " sel" : ""), onclick: () => { tb.querySelectorAll("tr").forEach((x) => x.classList.remove("sel")); tr.classList.add("sel"); showRel(r); } },
         h("td", {}, h("b", {}, r.concept), r.description ? h("div", { class: "faint", style: "font-size:11.5px" }, r.description) : null),
         h("td", { class: "n" }, r.positives.toLocaleString()),
-        h("td", {}, h("span", { class: "hbar", style: `width:${(r.auc_probe || 0) / maxAuc * 60}px` }), fmt(r.auc_probe, ".3f")),
-        h("td", {}, h("span", { class: "hbar b", style: `width:${(r.auc_cosine || 0) / maxAuc * 60}px` }), fmt(r.auc_cosine, ".3f")),
+        h("td", { class: "nw" }, h("span", { class: "hbar", style: `width:${(r.auc_probe || 0) / maxAuc * 70}px` }), fmt(r.auc_probe, ".3f")),
+        h("td", { class: "nw" }, h("span", { class: "hbar b", style: `width:${(r.auc_cosine || 0) / maxAuc * 70}px` }), fmt(r.auc_cosine, ".3f")),
         h("td", { class: "n" }, fmt(r.f1_probe, ".3f")), h("td", { class: "n" }, fmt(r.f1_cosine, ".3f")), h("td", { class: "n" }, fmt(r.ece_probe, ".3f")));
       tb.append(tr);
     });
     showRel(e.rows[0]);
     return section("Filters", `held-out test split: ${e.split.test.toLocaleString()} examples from files never seen in training`,
-      h("div", { class: "two" },
+      h("div", { style: "display:grid;gap:12px" },
         h("div", { class: "panel", style: "overflow:auto" }, h("table", { class: "t" },
           h("thead", {}, h("tr", {}, h("th", {}, "Concept"), h("th", { class: "n" }, "Positives"), h("th", {}, "AUC, probe"), h("th", {}, "AUC, cosine"),
             h("th", { class: "n" }, "F1, probe"), h("th", { class: "n" }, "F1, cosine"), h("th", { class: "n" }, "ECE"))), tb),
           h("div", { class: "faint", style: "font-size:11.5px;margin-top:8px" }, "Cosine: similarity to the mean embedding of the concept's examples, no training. Click a row for its calibration.")),
-        relBox));
+        h("div", { class: "two" }, relBox, h("div", { class: "panel muted", style: "font-size:12.5px" },
+          "A filter fires when its probability passes the threshold that gave the best F1 on the validation split. AUC measures ranking whatever the threshold: 0.5 is chance, 1 perfect. ECE is how far the stated probabilities are from the observed frequencies, as in the chart: points on the diagonal are calibrated. The filters, prototypes and thresholds are saved as probes.npz in the run's folder."))));
   },
 
   reliability() {

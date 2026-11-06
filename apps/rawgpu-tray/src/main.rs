@@ -111,6 +111,9 @@ fn program_name(cmd: &str) -> String {
     if cmd.contains("search_server.py") {
         return "Code Search".into();
     }
+    if cmd.contains("studio/runner.py") {
+        return "Training Studio".into();
+    }
     let words: Vec<&str> = cmd.split_whitespace().collect();
     let base = |w: &str| w.rsplit('/').next().unwrap_or(w).to_string();
     match words.first() {
@@ -138,6 +141,8 @@ fn program_kind(cmd: &str) -> &'static str {
         "indexer"
     } else if cmd.contains("search_server.py") {
         "search"
+    } else if cmd.contains("studio/runner.py") {
+        "studio"
     } else if cmd.split_whitespace().next().is_some_and(|w| w.ends_with("/rawgpu")) {
         "cli"
     } else {
@@ -305,6 +310,7 @@ struct Snapshot {
     settings: Settings,
     launch_at_login: bool,
     installed: bool,
+    studio: bool, // this checkout has rawgpu Studio (tools/studio.sh)
     now: f64,
 }
 
@@ -552,6 +558,7 @@ fn refresh(app: &AppHandle, sh: &Shared) {
         derive(&mut s);
         s.launch_at_login = launch_at_login();
         s.installed = app_bundle().is_some();
+        s.studio = studio_script().is_some();
         s.history = sh.history.lock().unwrap().iter().cloned().collect();
         s.clone()
     };
@@ -1067,6 +1074,35 @@ fn open_search() {
     }
 }
 
+const STUDIO_PORT: u16 = 8765;
+
+/// tools/studio.sh in the checkout this app was built from (a release has no Studio)
+fn studio_script() -> Option<PathBuf> {
+    let p = repo().join("tools/studio.sh");
+    p.is_file().then_some(p)
+}
+
+/// rawgpu Studio, the training web app: open it, starting its server first if nothing answers on its port
+/// (the script opens the browser once the server is listening).
+fn open_studio_page() {
+    let url = format!("http://127.0.0.1:{STUDIO_PORT}");
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], STUDIO_PORT));
+    if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok() {
+        let _ = Command::new("open").arg(&url).status();
+        return;
+    }
+    let Some(script) = studio_script() else { return };
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(repo().join("local/studio.log"));
+    let mut cmd = Command::new(script);
+    cmd.current_dir(repo()).stdin(Stdio::null());
+    if let Ok(f) = log {
+        if let Ok(f2) = f.try_clone() {
+            cmd.stdout(f).stderr(f2);
+        }
+    }
+    let _ = cmd.spawn();
+}
+
 // ---------------------------------------------------------------- commands
 
 #[tauri::command]
@@ -1075,6 +1111,7 @@ fn get_state(app: AppHandle, sh: State<'_, Sh>) -> Snapshot {
     derive(&mut s);
     s.launch_at_login = launch_at_login();
     s.installed = app_bundle().is_some();
+    s.studio = studio_script().is_some();
     s.history = sh.history.lock().unwrap().iter().cloned().collect();
     let _ = app;
     s.clone()
@@ -1184,6 +1221,12 @@ fn open_code_search(app: AppHandle) {
 }
 
 #[tauri::command]
+fn open_studio(app: AppHandle) {
+    hide_panel(&app);
+    open_studio_page();
+}
+
+#[tauri::command]
 fn open_logs(app: AppHandle) {
     hide_panel(&app);
     let _ = Command::new("open").arg(home().join("rawgpu-index/logs")).status();
@@ -1208,6 +1251,7 @@ fn main() {
             let up = MenuItem::with_id(app, "up", "Connect and Bring Up Card", false, None::<&str>)?;
             let details = MenuItem::with_id(app, "details", "Details…", true, None::<&str>)?;
             let search = MenuItem::with_id(app, "search", "Code Search", true, None::<&str>)?;
+            let studio = MenuItem::with_id(app, "studio", "Training Studio", studio_script().is_some(), None::<&str>)?;
             let temp = CheckMenuItem::with_id(app, "temp", "Show Temperature in Menu Bar", true, settings.menu_bar_temp, None::<&str>)?;
             let login = CheckMenuItem::with_id(app, "login", "Open at Login", true, launch_at_login(), None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit rawgpu", true, Some("CmdOrCtrl+Q"))?;
@@ -1221,6 +1265,7 @@ fn main() {
                     &up,
                     &PredefinedMenuItem::separator(app)?,
                     &search,
+                    &studio,
                     &details,
                     &PredefinedMenuItem::separator(app)?,
                     &temp,
@@ -1272,6 +1317,7 @@ fn main() {
                     "up" => bring_up(app, &menu_sh),
                     "details" => show_details(app),
                     "search" => open_search(),
+                    "studio" => open_studio_page(),
                     "temp" => {
                         let on = !menu_sh.snap.lock().unwrap().settings.menu_bar_temp;
                         let _ = set_setting(app.clone(), app.state::<Sh>(), "menu_bar_temp".into(), Value::Bool(on));
@@ -1346,6 +1392,7 @@ fn main() {
             close_panel,
             open_details,
             open_code_search,
+            open_studio,
             open_logs,
             quit
         ])

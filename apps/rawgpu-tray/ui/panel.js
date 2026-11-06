@@ -31,6 +31,7 @@ const I = {
   db: ["M3 4c0-1.1 2.2-2 5-2s5 .9 5 2-2.2 2-5 2-5-.9-5-2z", "M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4", "M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"],
   term: ["M2.5 3.5h11v9h-11z", "m5 6.5 2 1.5-2 1.5M8.5 10h2.5"],
   app: ["M3 3h10v10H3z", "M3 6h10"],
+  studio: ["M2.5 13.5h11", "m3.5 10.5 3-3.5 2.5 2 4-4.5"],
 };
 const fmt = (n) => (typeof n === "number" ? n.toLocaleString() : String(n));
 const ENGINE_MAX = 1545, MEMORY_MAX = 2000;
@@ -228,7 +229,7 @@ function renderHolder(s) {
   const show = !!hd && (s.mode === "busy" || s.mode === "ejecting");
   $("holder").hidden = !show;
   if (!show) return;
-  const ic = { indexer: I.db, search: I.search, cli: I.term }[hd.kind] || I.app;
+  const ic = { indexer: I.db, search: I.search, cli: I.term, studio: I.studio }[hd.kind] || I.app;
   $("holder-icon").replaceChildren(icon(ic));
   $("holder-name").textContent = cap(hd.name);
   $("holder-time").textContent = hd.started ? `for ${span(Date.now() / 1000 - hd.started)}` : "";
@@ -305,6 +306,7 @@ function renderActions(s) {
   const sec = h("div", "secondary");
   let primary = null;
   const search = () => act("Code Search", I.search, () => invoke("open_code_search"));
+  const studio = () => (s.studio ? act("Studio", I.studio, () => invoke("open_studio"), { title: "rawgpu Studio: train models on the card" }) : null);
   const details = () => act("Details", I.details, () => invoke("open_details"));
   const connect = (p) => act(s.mode === "not-posted" ? "Bring Up Card" : "Connect", I.power, () => invoke("up"), { primary: p, disabled: !s.up_enabled });
   const ejectBtn = (p, label) => act(label || "Eject", I.eject, () => invoke("eject"), { primary: p, disabled: !s.eject_enabled,
@@ -320,11 +322,11 @@ function renderActions(s) {
       break;
     case "busy":
       primary = ejectBtn(true, s.holder ? `Eject When ${s.holder.name.replace(/^the /, "")} Finishes` : "Eject When the Card Is Free");
-      sec.append(search(), details());
+      sec.append(...[search(), studio(), details()].filter(Boolean));
       break;
     case "off":
       primary = connect(true);
-      sec.append(search(), details());
+      sec.append(...[search(), studio(), details()].filter(Boolean));
       if (s.eject.state === "done") sec.prepend(act("Done", null, () => invoke("dismiss")));
       break;
     case "not-posted":
@@ -340,7 +342,7 @@ function renderActions(s) {
       break;
     default: // idle, reading, not-answering
       primary = ejectBtn(true, "Eject");
-      sec.append(search(), details());
+      sec.append(...[search(), studio(), details()].filter(Boolean));
   }
   box.replaceChildren(primary, sec);
 }
