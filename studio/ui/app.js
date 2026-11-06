@@ -741,7 +741,7 @@ const PANELS = {
       relBox.replaceChildren(h("div", { class: "chart-head" }, h("h3", {}, `Calibration: ${row.concept}`), h("span", { class: "unit" }, "predicted vs. observed")));
       const pts = row.reliability.filter((b) => b.count).map((b) => [b.confidence, b.accuracy]);
       new LineChart(relBox, { series: [{ key: "r", label: "Probe" }, { key: "d", label: "Perfect", dash: true, color: "--s2" }], height: 240, xDomain: [0, 1], yDomain: [0, 1],
-        xLabel: "predicted", xName: "Predicted", fmt: ".2f", xfmt: (v) => fmt(v, ".1f") }).update({ r: pts, d: [[0, 0], [1, 1]] });
+        xLabel: "predicted", xName: "Predicted", fmt: ".2f", xfmt: (v) => fmt(v, ".2f") }).update({ r: pts, d: [[0, 0], [1, 1]] });
     };
     const tb = h("tbody");
     const maxAuc = 1;
@@ -771,7 +771,7 @@ const PANELS = {
     const box = h("div", { class: "panel" }, h("div", { class: "chart-head" }, h("h3", {}, "Reliability"), h("span", { class: "unit" }, "stated confidence vs. how often it was right")));
     const pts = (bins) => bins.filter((b) => b.count).map((b) => [b.confidence, b.accuracy]);
     new LineChart(box, { series: [{ key: "a", label: "Calibrated" }, { key: "b", label: "Before", color: "--s2" }, { key: "d", label: "Perfect", dash: true, color: "--s3" }],
-      height: 280, xDomain: [0, 1], yDomain: [0, 1], xName: "Confidence", xLabel: "confidence", fmt: ".2f", xfmt: (v) => fmt(v, ".1f") })
+      height: 280, xDomain: [0, 1], yDomain: [0, 1], xName: "Confidence", xLabel: "confidence", fmt: ".2f", xfmt: (v) => fmt(v, ".2f") })
       .update({ a: pts(e.bins_after), b: pts(e.bins_before), d: [[0, 0], [1, 1]] });
     const rows = e.questions.map((q) => h("tr", {}, h("td", {}, h("span", { class: "badge" }, q.type)), h("td", {}, q.question),
       h("td", { class: "n" }, q.options), h("td", { class: "n" }, fmt(q.accuracy, ".1%")), h("td", { class: "n" }, fmt(q.confidence, ".2f")),
