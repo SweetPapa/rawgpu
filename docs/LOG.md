@@ -44,6 +44,12 @@ Dated, factual notes from real hardware. Newest first.
 - **`.github/workflows/ci.yml`** builds everything without a GPU and checks
   that a release binary has no build path in it. It is manual while the
   repository is private, since macOS minutes cost 10x there.
+- **Found by the first dry run on GitHub's runner:** its newer Homebrew
+  LLVM defaults to code object v6, which needs `oclc_abi_version_600.bc`.
+  The pinned ROCm 6.0 device libraries stop at v5. The build and
+  `rawgpu_program_build()` now pass `-mcode-object-version=5`, the version
+  LLVM 20 produced, so any current `brew install llvm` works. The kernel
+  cache salt changed with it.
 - **Tested:**
   - an ad-hoc local package: release CLI paths, the bundled CLI finding its
     scripts, no build paths in `strings`, firmware fetched into a scratch
