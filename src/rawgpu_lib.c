@@ -343,7 +343,7 @@ rawgpu_program *rawgpu_program_build(rawgpu *g, const char *source, const char *
   if (r) { fail(g, r, "cannot create the kernel cache %s", dir); return NULL; }
 
   uint64_t h = 0xcbf29ce484222325ull;
-  const char *salt = "rawgpu-kernel-cache-2 gfx803";
+  const char *salt = "rawgpu-kernel-cache-3 gfx803 cov5";
   h = fnv(h, salt, strlen(salt) + 1);
   h = fnv(h, clang, strlen(clang) + 1);
   h = fnv(h, libdir, strlen(libdir) + 1);
@@ -374,6 +374,7 @@ rawgpu_program *rawgpu_program_build(rawgpu *g, const char *source, const char *
   argv[n++] = "-target";
   argv[n++] = "amdgcn-amd-amdhsa";
   argv[n++] = "-mcpu=gfx803";
+  argv[n++] = "-mcode-object-version=5"; /* LLVM 21+ defaults to v6, newer than the pinned device libraries */
   argv[n++] = "-O2";
   argv[n++] = "-cl-kernel-arg-info"; /* argument names in the metadata, for messages and bindings */
   argv[n++] = devlib;

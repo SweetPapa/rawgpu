@@ -96,7 +96,9 @@ atom-names:
 # relocatable object directly.
 AMDGPU_CLANG ?= /opt/homebrew/opt/llvm/bin/clang
 DEVICE_LIBS := local/device-libs
-AMDGPU_CFLAGS := -x cl -cl-std=CL1.2 -target amdgcn-amd-amdhsa -mcpu=gfx803 -O2 -cl-kernel-arg-info \
+# code object v5, explicitly: LLVM 21 and later default to v6, which the pinned ROCm 6.0 device libraries
+# predate (they have oclc_abi_version_400/500 only)
+AMDGPU_CFLAGS := -x cl -cl-std=CL1.2 -target amdgcn-amd-amdhsa -mcpu=gfx803 -mcode-object-version=5 -O2 -cl-kernel-arg-info \
                  --rocm-device-lib-path=$(DEVICE_LIBS)
 KERNELS := $(patsubst kernels/%.cl,build/kernels/%.o,$(wildcard kernels/*.cl))
 
