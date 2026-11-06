@@ -741,7 +741,7 @@ const PANELS = {
       relBox.replaceChildren(h("div", { class: "chart-head" }, h("h3", {}, `Calibration: ${row.concept}`), h("span", { class: "unit" }, "predicted vs. observed")));
       const pts = row.reliability.filter((b) => b.count).map((b) => [b.confidence, b.accuracy]);
       new LineChart(relBox, { series: [{ key: "r", label: "Probe" }, { key: "d", label: "Perfect", dash: true, color: "--s2" }], height: 240, xDomain: [0, 1], yDomain: [0, 1],
-        xLabel: "predicted", xName: "Predicted", fmt: ".2f", xfmt: (v) => fmt(v, ".1f") }).update({ r: pts, d: [[0, 0], [1, 1]] });
+        xLabel: "predicted", xName: "Predicted", fmt: ".2f", xfmt: (v) => fmt(v, ".2f") }).update({ r: pts, d: [[0, 0], [1, 1]] });
     };
     const tb = h("tbody");
     const maxAuc = 1;
@@ -771,24 +771,26 @@ const PANELS = {
     const box = h("div", { class: "panel" }, h("div", { class: "chart-head" }, h("h3", {}, "Reliability"), h("span", { class: "unit" }, "stated confidence vs. how often it was right")));
     const pts = (bins) => bins.filter((b) => b.count).map((b) => [b.confidence, b.accuracy]);
     new LineChart(box, { series: [{ key: "a", label: "Calibrated" }, { key: "b", label: "Before", color: "--s2" }, { key: "d", label: "Perfect", dash: true, color: "--s3" }],
-      height: 280, xDomain: [0, 1], yDomain: [0, 1], xName: "Confidence", xLabel: "confidence", fmt: ".2f", xfmt: (v) => fmt(v, ".1f") })
+      height: 280, xDomain: [0, 1], yDomain: [0, 1], xName: "Confidence", xLabel: "confidence", fmt: ".2f", xfmt: (v) => fmt(v, ".2f") })
       .update({ a: pts(e.bins_after), b: pts(e.bins_before), d: [[0, 0], [1, 1]] });
     const rows = e.questions.map((q) => h("tr", {}, h("td", {}, h("span", { class: "badge" }, q.type)), h("td", {}, q.question),
       h("td", { class: "n" }, q.options), h("td", { class: "n" }, fmt(q.accuracy, ".1%")), h("td", { class: "n" }, fmt(q.confidence, ".2f")),
-      h("td", { class: "n" }, fmt(q.ece, ".3f")), h("td", { class: "n" }, fmt(q.brier, ".3f")), h("td", { class: "n" }, q.n.toLocaleString())));
-    return section("Calibration", `test split, temperature ${fmt(e.temperature, ".2f")} fit on the validation split`,
+      h("td", { class: "n" }, fmt(q.ece, ".3f")), h("td", { class: "n" }, fmt(q.brier, ".3f")),
+      h("td", { class: "n" }, q.temperature !== undefined ? fmt(q.temperature, ".2f") : "–"), h("td", { class: "n" }, q.n.toLocaleString())));
+    return section("Calibration", e.temperatures ? "test split; a temperature per question, fit on the validation split" : `test split, temperature ${fmt(e.temperature, ".2f")} fit on the validation split`,
       h("div", { class: "two" },
         h("div", { style: "display:grid;gap:12px;align-content:start" },
           h("div", { class: "tiles" },
-            h("div", { class: "tile" }, h("div", { class: "k" }, "ECE, calibrated"), h("div", { class: "v" }, fmt(e.after.ece, ".3f")), h("div", { class: "c" }, `before: ${fmt(e.before.ece, ".3f")}`)),
+            h("div", { class: "tile" }, h("div", { class: "k" }, "ECE, calibrated"), h("div", { class: "v" }, fmt(e.after.ece, ".3f")),
+              h("div", { class: "c" }, `before: ${fmt(e.before.ece, ".3f")}` + (e.global_t ? ` · one temperature: ${fmt(e.global_t.ece, ".3f")}` : ""))),
             h("div", { class: "tile" }, h("div", { class: "k" }, "NLL, calibrated"), h("div", { class: "v" }, fmt(e.after.nll, ".3f")), h("div", { class: "c" }, `before: ${fmt(e.before.nll, ".3f")}`)),
             h("div", { class: "tile" }, h("div", { class: "k" }, "Brier, calibrated"), h("div", { class: "v" }, fmt(e.after.brier, ".3f")), h("div", { class: "c" }, `before: ${fmt(e.before.brier, ".3f")}`)),
             h("div", { class: "tile" }, h("div", { class: "k" }, "Accuracy"), h("div", { class: "v" }, fmt(e.after.accuracy, ".1%")), h("div", { class: "c" }, `${e.after.n.toLocaleString()} test examples`))),
-          h("div", { class: "panel muted", style: "font-size:12.5px" }, "Temperature scaling divides every logit by one number, fit on the validation split: it changes how sure the critic is, never which option it picks. The diagonal is perfect calibration: points below it are overconfident.")),
+          h("div", { class: "panel muted", style: "font-size:12.5px" }, "Temperature scaling divides the logits by a number fit on the validation split, one per trained question (new questions get the global one): it changes how sure the critic is, never which option it picks. The diagonal is perfect calibration; points below it are overconfident.")),
         box),
       h("div", { class: "panel", style: "overflow:auto;margin-top:12px" }, h("table", { class: "t" },
         h("thead", {}, h("tr", {}, h("th", {}, "Type"), h("th", {}, "Question"), h("th", { class: "n" }, "Options"), h("th", { class: "n" }, "Accuracy"),
-          h("th", { class: "n" }, "Confidence"), h("th", { class: "n" }, "ECE"), h("th", { class: "n" }, "Brier"), h("th", { class: "n" }, "Examples"))), h("tbody", {}, rows)),
+          h("th", { class: "n" }, "Confidence"), h("th", { class: "n" }, "ECE"), h("th", { class: "n" }, "Brier"), h("th", { class: "n" }, "Temperature"), h("th", { class: "n" }, "Examples"))), h("tbody", {}, rows)),
         h("div", { class: "faint", style: "font-size:11.5px;margin-top:8px" }, "Confidence is Jev's: (J × p_max − 1) / (J − 1) for J options, 0 for an even spread, 1 for certainty.")));
   },
 

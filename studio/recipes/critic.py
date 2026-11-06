@@ -8,7 +8,8 @@ question's options, are the probabilities. Because options are text, the critic 
 question with new options; it answers best near what it was trained on.
 
 After training, temperature scaling on the validation split calibrates the probabilities (Jev's selling
-point), and the test split measures it: expected calibration error, Brier score, NLL and reliability
+point): one temperature per trained question (questions differ in how overconfident the head is), and a
+global one for new questions. The test split measures it: expected calibration error, Brier score, NLL and reliability
 diagrams, before and after. Confidence is Jev's (J * p_max - 1) / (J - 1).
 
 Data: questions generated from your code index (the language, the kind of file, its size, whether it is
@@ -53,9 +54,9 @@ META = {
     "tiles": [
         {"key": "test_accuracy", "label": "Test accuracy", "fmt": ".1%", "best": "max"},
         {"key": "test_ece", "label": "Calibration error", "fmt": ".3f", "best": "min",
-         "help": "after temperature scaling; 0 is perfect"},
+         "help": "after temperature scaling per question; 0 is perfect"},
         {"key": "test_brier", "label": "Brier score", "fmt": ".3f", "best": "min"},
-        {"key": "temperature", "label": "Temperature", "fmt": ".2f"},
+        {"key": "temperature", "label": "Temperature", "fmt": ".2f", "help": "for new questions; each trained one has its own"},
     ],
     "charts": [
         {"title": "Loss", "series": [{"key": "loss", "label": "Training"}, {"key": "val_loss", "label": "Validation"}]},
@@ -208,8 +209,10 @@ def logits_for(model, data, rows, batch=4096):
 
 
 def evaluate(lg, rows, data, T):
-    """Overall and per-question metrics at temperature T, and the reliability bins"""
-    p = metrics.softmax(lg, T)
+    """Overall and per-question metrics at temperature T (a number, or one per question), and the
+    reliability bins"""
+    Tr = np.asarray(T, np.float64)[rows[:, 1]][:, None] if np.ndim(T) else T
+    p = metrics.softmax(lg, Tr)
     labels = rows[:, 2]
     overall, rel = metrics.multiclass(p, labels)
     per = []
@@ -225,7 +228,7 @@ def evaluate(lg, rows, data, T):
         J = len(cols)
         conf = ((J * pq.max(1) - 1) / (J - 1)).mean() if J > 1 else 1.0
         per.append(dict(id=q["id"], question=q["text"], type=q["type"], options=J, confidence=float(conf), reliability=rr,
-                        **r))
+                        temperature=float(np.asarray(T)[qi]) if np.ndim(T) else float(T), **r))
     return overall, rel, per
 
 
@@ -272,15 +275,21 @@ def train(run):
     run.load("best", model=model)
     lv, lt = logits_for(model, data, va), logits_for(model, data, te)
     T = metrics.fit_temperature(lv, va[:, 2])
+    Tq = np.full(len(data["questions"]), T)
+    for qi in range(len(Tq)):
+        m = va[:, 1] == qi
+        if m.sum() >= 30:
+            Tq[qi] = metrics.fit_temperature(lv[m], va[m, 2])
     before, rel_b, _ = evaluate(lt, te, data, 1.0)
-    after, rel_a, per = evaluate(lt, te, data, T)
-    run.event("reliability", total - 1, temperature=T, before=before, after=after, bins_before=rel_b, bins_after=rel_a,
-              questions=per)
+    glob, _, _ = evaluate(lt, te, data, T)
+    after, rel_a, per = evaluate(lt, te, data, Tq)
+    run.event("reliability", total - 1, temperature=T, temperatures=Tq.tolist(), before=before, global_t=glob,
+              after=after, bins_before=rel_b, bins_after=rel_a, questions=per)
     summary = {"test_accuracy": after["accuracy"], "test_ece": after["ece"], "test_brier": after["brier"],
-               "test_nll": after["nll"], "ece_before": before["ece"], "temperature": T}
+               "test_nll": after["nll"], "ece_before": before["ece"], "ece_global_t": glob["ece"], "temperature": T}
     run.log(total - 1, **summary)
     run.summary(**summary)
-    run.save("best", model=model, step=total - 1, temperature=T, Qv=Qv, Ov=Ov, opt_q=opt_q,
+    run.save("best", model=model, step=total - 1, temperature=T, temperatures=Tq, Qv=Qv, Ov=Ov, opt_q=opt_q,
              opt_names=np.array(data["opt_names"]), questions=np.array(json.dumps(data["questions"])))
 
 
@@ -299,6 +308,8 @@ def try_it(run, req):
         q = questions[qi]
         cols = np.flatnonzero(ex["opt_q"] == qi)
         qv = ex["Qv"][qi:qi + 1]
+        if "temperatures" in ex:
+            T = float(ex["temperatures"][qi])
         O = np.concatenate([ex["Ov"][cols], np.repeat(qv, len(cols), 0)], 1)
         names = [str(ex["opt_names"][c]) for c in cols]
     else:
