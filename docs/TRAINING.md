@@ -8,7 +8,8 @@ recipes and shows them as they go.
 tools/studio.sh                       # http://127.0.0.1:8765, opened in the browser
 ```
 
-The menu bar app's **Studio** button does the same, in a checkout build.
+The menu bar app's **Studio** button does the same, in a checkout build. Studio is not in releases,
+so it needs a source checkout; the release tarball has `rawgpu.nn`.
 
 Studio needs a Python with numpy. The EmbeddingGemma 2 recipes also need `tokenizers` and
 `huggingface_hub`; this checkout's `local/eg2-venv` has all three

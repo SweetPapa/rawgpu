@@ -8,8 +8,11 @@ A release is two signed and notarized files, plus their checksums:
 | `rawgpu-app-<v>-macos-arm64.zip` | `rawgpu.app`, the menu bar app, with the CLI and the setup scripts inside it (stapled) |
 | `SHA256SUMS` | checksums of the two files above |
 
-Code Search is not in releases: it needs PyTorch, a venv and an index, so it
-is built from source (`make install-apps`).
+Code Search and rawgpu Studio are not in releases; both run from a source
+checkout. Code Search needs PyTorch, a venv and an index, and is built with
+`make install-apps`. Studio is started with `tools/studio.sh` (see
+[TRAINING.md](TRAINING.md)). `rawgpu.nn`, the library Studio trains with, is
+in the tarball.
 
 ## Cutting one
 
