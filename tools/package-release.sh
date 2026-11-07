@@ -133,7 +133,19 @@ APP="$W/target/release/bundle/macos/rawgpu.app"
 # Without an identity Tauri leaves the linker's signature, which does not cover the bundle's resources.
 [ -n "${SIGN_IDENTITY:-}" ] || codesign --force --deep --sign - "$APP"
 codesign --verify --deep --strict "$APP"
-[ "$notarize" = 1 ] && { xcrun stapler validate "$APP"; spctl --assess --type execute -vv "$APP"; }
+if [ "$notarize" = 1 ]; then
+  grep -iE "notari|stapl" "$W/app.log" || true
+  # Tauri notarizes and staples the app itself, but once (v0.1.0's first run) it exited 0 with no ticket
+  # stapled. Then notarize it here, and staple with retries: a new ticket can take a while to be served.
+  if ! xcrun stapler validate "$APP" >/dev/null 2>&1; then
+    say "the app has no notarization ticket: notarizing it here"
+    (cd "$(dirname "$APP")" && ditto -c -k --keepParent rawgpu.app "$W/app-notarize.zip")
+    notarize_zip "$W/app-notarize.zip"
+    for i in 1 2 3 4 5 6; do xcrun stapler staple "$APP" && break; [ "$i" = 6 ] && exit 1; sleep 20; done
+  fi
+  xcrun stapler validate "$APP"
+  spctl --assess --type execute -vv "$APP"
+fi
 (cd "$(dirname "$APP")" && ditto -c -k --keepParent rawgpu.app "$OUT/rawgpu-app-$V-macos-arm64.zip")
 
 (cd "$OUT" && shasum -a 256 "$NAME-macos-arm64.tar.gz" "rawgpu-app-$V-macos-arm64.zip" >SHA256SUMS)
